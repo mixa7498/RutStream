@@ -40,6 +40,10 @@ func main() {
 		err = runPlan(os.Args[2:])
 	case "announce":
 		err = runAnnounce(os.Args[2:])
+	case "torrentdump":
+		err = runTorrentDump(os.Args[2:])
+	case "searchdump":
+		err = runSearchDump(os.Args[2:])
 	case "feed":
 		err = runFeed(os.Args[2:])
 	case "search":

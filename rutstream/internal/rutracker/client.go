@@ -11,6 +11,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/html/charset"
@@ -55,6 +56,9 @@ type Client struct {
 	http   *http.Client
 	jar    *cookiejar.Jar
 	mirror string
+
+	mu       sync.Mutex
+	transport Transport
 }
 
 // New создаёт клиента.
@@ -160,7 +164,8 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values) (
 		return nil, fmt.Errorf("rutracker: неожиданный редирект на %s", loc)
 	case http.StatusForbidden, http.StatusServiceUnavailable:
 		if IsChallenge(raw) {
-			return nil, ErrChallenge
+			// Прямой запрос не прошёл проверку Cloudflare — пробуем браузер.
+			return c.doViaTransport(ctx, method, path, form)
 		}
 		return nil, fmt.Errorf("rutracker: HTTP %d (%s)", resp.StatusCode, resp.Status)
 	default:
@@ -171,9 +176,28 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values) (
 		return nil, err
 	}
 	if IsChallenge(decoded) {
-		return nil, ErrChallenge
+		return c.doViaTransport(ctx, method, path, form)
 	}
 	return decoded, nil
+}
+
+// doViaTransport повторяет запрос через браузерный транспорт.
+func (c *Client) doViaTransport(ctx context.Context, method, path string, form url.Values) ([]byte, error) {
+	t := c.Transport()
+	if t == nil {
+		return nil, ErrChallenge
+	}
+	raw, err := t.Fetch(ctx, method, c.URL(path), form)
+	if err != nil {
+		return nil, fmt.Errorf("браузерный транспорт: %w", err)
+	}
+	if IsChallenge(raw) {
+		return nil, ErrChallenge
+	}
+	// Браузер отдаёт HTML уже в UTF-8 — перекодировать нельзя, иначе
+	// русские заголовки превратятся в мусор. Двоичные данные (.torrent)
+	// не трогаем вовсе.
+	return raw, nil
 }
 
 // IsChallenge определяет Cloudflare-challenge по телу ответа.

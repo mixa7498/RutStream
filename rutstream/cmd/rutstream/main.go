@@ -61,6 +61,8 @@ func main() {
 		err = cmdLogin(ctx)
 	case "check":
 		err = cmdCheck(ctx)
+	case "session":
+		err = cmdSession(ctx)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -100,6 +102,7 @@ type app struct {
 	engine   *torrent.Engine
 	dataDir  string
 	loggedIn bool
+	cdp      *rutracker.CDP
 }
 
 func newApp() (*app, error) {
@@ -140,10 +143,50 @@ func newApp() (*app, error) {
 	}
 	a := &app{client: c, store: store, engine: engine, dataDir: dataDir}
 	a.applySession()
+	a.attachBrowser()
 	return a, nil
 }
 
+// attachBrowser подключает браузерный транспорт, если пользователь запустил
+// Edge/Chrome с --remote-debugging-port. Это снимает Cloudflare-challenge:
+// запросы идут из настоящего браузера с вашим профилем и cookie.
+func (a *app) attachBrowser() {
+	port := rutracker.DefaultCDPPort
+	if v := os.Getenv("RUTSTREAM_CDP_PORT"); v != "" {
+		port = rutracker.PortFromArg(v)
+	}
+	if !rutracker.CDPAvailable(port) {
+		return
+	}
+	cdp, err := rutracker.ConnectCDP(port)
+	if err != nil {
+		return
+	}
+	a.cdp = cdp
+	a.client.SetTransport(rutracker.NewCDPTransport(cdp))
+	// Заодно подтягиваем cookie браузера (в т.ч. cf_clearance и bb_session).
+	if cookies, err := cdp.Cookies(); err == nil {
+		a.client.ImportCookiesTo(cookies)
+	}
+	// И наоборот: переносим нашу сессию в браузер, чтобы защищённые страницы
+	// открывались авторизованными (Cloudflare пропускает браузер, но не наш
+	// HTTP-клиент, поэтому ходим через него).
+	if session := a.client.SessionCookie(); session != "" {
+		_ = cdp.SetCookie(&rutracker.BrowserCookie{
+			Name:     "bb_session",
+			Value:    session,
+			Domain:   "rutracker.org",
+			Path:     "/forum/",
+			HTTPOnly: true,
+			Secure:   true,
+		})
+	}
+}
+
 func (a *app) close() {
+	if a.cdp != nil {
+		a.cdp.Close()
+	}
 	a.engine.Close()
 	a.store.Close()
 }
@@ -245,6 +288,78 @@ func cmdLogin(ctx context.Context) error {
 	return nil
 }
 
+// cmdSession импортирует сессию из браузера пользователя через DevTools-протокол.
+//
+// Cloudflare пропускает обычный браузер с реальным профилем, но режет программные
+// клиенты. Мы подключаемся к уже запущенному Edge/Chrome (--remote-debugging-port),
+// один раз открываем форум и забираем оттуда cookie (включая cf_clearance).
+// После этого приложение работает на обычном HTTP — браузер больше не нужен.
+func cmdSession(ctx context.Context) error {
+	port := rutracker.DefaultCDPPort
+	if len(os.Args) > 2 {
+		port = rutracker.PortFromArg(os.Args[2])
+	}
+	if !rutracker.CDPAvailable(port) {
+		fmt.Printf("Браузер с отладкой на порту %d не запущен.\n", port)
+		fmt.Println("Запустите в отдельном окне PowerShell:")
+		fmt.Printf(`  & "$env:ProgramFiles(x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=%d`+"\n", port)
+		fmt.Println("Затем повторите: rutstream session")
+		return fmt.Errorf("браузер с отладкой не запущен")
+	}
+
+	cdp, err := rutracker.ConnectCDP(port)
+	if err != nil {
+		return err
+	}
+	defer cdp.Close()
+
+	fmt.Println("Открываю форум в вашем браузере (прохожу проверку Cloudflare)…")
+	html, err := cdp.Fetch(a0().client.Mirror()+"/forum/viewforum.php?f=409", 90*time.Second)
+	if err != nil {
+		return fmt.Errorf("не удалось открыть страницу: %w", err)
+	}
+	if rutracker.IsChallenge(html) {
+		return fmt.Errorf("проверка Cloudflare не пройдена: обновите страницу в окне браузера и повторите")
+	}
+	fmt.Println("Страница получена, забираю cookie…")
+
+	cookies, err := cdp.Cookies()
+	if err != nil {
+		return fmt.Errorf("чтение cookie: %w", err)
+	}
+	app := a0()
+	n := app.client.ImportCookiesTo(cookies)
+	fmt.Printf("Перенесено cookie: %d\n", n)
+	fmt.Println("cf_clearance:", app.client.HasClearance())
+	fmt.Println("авторизация: ", app.client.LoggedIn(ctx))
+
+	// Проверяем, что защищённые страницы теперь читаются.
+	if _, err := app.client.Topic(ctx, 6924752); err != nil {
+		return fmt.Errorf("чтение темы всё ещё не работает: %w", err)
+	}
+	fmt.Println("чтение темы:   ок")
+	topics, err := app.client.Search(ctx, "radiohead", 1698, 0)
+	if err != nil {
+		return fmt.Errorf("поиск всё ещё не работает: %w", err)
+	}
+	fmt.Printf("поиск:         ок, найдено %d\n", len(topics))
+	return nil
+}
+
+// a0 создаёт приложение с подключённым клиентом (для импорта cookie).
+func a0() *app {
+	if globalApp == nil {
+		globalApp = &app{}
+		if c, err := rutracker.New(rutracker.Options{Timeout: 30 * time.Second}); err == nil {
+			globalApp.client = c
+		}
+	}
+	return globalApp
+}
+
+// globalApp — простое переиспользование клиента между командами.
+var globalApp *app
+
 // cmdCheck проверяет доступ: авторизация, разделы, защищённая страница.
 func cmdCheck(ctx context.Context) error {
 	a, err := newApp()
@@ -333,39 +448,27 @@ func cmdSearch(ctx context.Context, args []string) error {
 	}
 	defer a.close()
 
-	if forumID == 0 {
-		forums, err := a.loadForums(ctx)
-		if err != nil {
-			return err
-		}
-		// По умолчанию ищем по первому музыкальному разделу.
-		for _, f := range forums {
-			switch f.CatID {
-			case 8, 22, 23, 31, 35, 37:
-				forumID = f.ID
-			}
-			if forumID != 0 {
-				break
-			}
-		}
-		if forumID == 0 && len(forums) > 0 {
-			forumID = forums[0].ID
-		}
-	}
+	// Поиск по названию идёт по всему сайту (раздел фильтруется у нас),
+	// если пользователь явно не указал раздел.
 	topics, err := a.client.Search(ctx, query, int(forumID), 0)
 	if err != nil {
-		return fmt.Errorf("поиск: %w (если видите ошибку Cloudflare — укажите RUTSTREAM_COOKIE)", err)
+		return fmt.Errorf("поиск: %w", err)
 	}
-	fmt.Printf("Найдено %d раздач в разделе %d\n\n", len(topics), forumID)
+	if forumID == 0 {
+		fmt.Printf("Найдено %d раздач (по всему сайту)\n\n", len(topics))
+	} else {
+		fmt.Printf("Найдено %d раздач в разделе %d\n\n", len(topics), forumID)
+	}
 	for _, t := range topics {
 		lossless := ""
 		if isLosslessTitle(t.Title) {
 			lossless = "lossless"
 		}
 		fmt.Printf("[%d] %s\n", t.ID, t.Title)
-		fmt.Printf("     %s | сиды %d | личеры %d | %s | %s\n", t.SizeText, t.Seeds, t.Peers, t.Date, lossless)
+		fmt.Printf("     %s | сиды %d | личеры %d | раздел %d %s | %s\n",
+			t.SizeText, t.Seeds, t.Peers, t.ForumID, t.Category, lossless)
 		cp := catalog.Topic{
-			ID: t.ID, ForumID: forumID, Title: t.Title, InfoHash: t.InfoHash, Size: t.Size,
+			ID: t.ID, ForumID: int64(t.ForumID), Title: t.Title, InfoHash: t.InfoHash, Size: t.Size,
 			Seeds: t.Seeds, Peers: t.Peers, Downloads: t.Downloads, Lossless: isLosslessTitle(t.Title),
 		}
 		if err := a.store.SaveTopic(ctx, cp); err != nil {
