@@ -41,6 +41,10 @@ type TrackPlan struct {
 	DurationSec float64 `json:"durationSec"`
 	Confidence  float64 `json:"confidence"`
 	Source      string  `json:"source"`
+	// Container — контейнер внутри файла ("zip" — запись архива).
+	Container string `json:"container"`
+	// ContainerMethod — метод сжатия внутри контейнера (0 — без сжатия, 8 — deflate).
+	ContainerMethod uint16 `json:"containerMethod"`
 }
 
 // SiteTrack — трек, прочитанный со страницы раздачи на rutracker.
@@ -115,7 +119,9 @@ func Build(info *metainfo.Info, hints Hints) (*Index, error) {
 
 	audio := make([]int, 0, len(files))
 	for i, f := range files {
-		if IsAudioFile(FilePath(f)) {
+		path := FilePath(f)
+		// Контейнеры (zip/rar) тоже разбираем: внутри них могут лежать треки.
+		if IsAudioFile(path) || IsContainerFile(path) {
 			audio = append(audio, i)
 		}
 	}
@@ -264,9 +270,27 @@ func buildSingleFile(ix *Index, fileIdx int, hints Hints) error {
 			if res.DurationSec > 0 {
 				tp.DurationSec = res.DurationSec
 			}
-			if len(res.Tracks) > 1 {
-				// Внутри одного файла несколько треков — размечаем их по смещениям.
+			if res.Format == "zip" && len(res.Tracks) > 0 {
+				// Архив с отдельными треками: границы берём из записей ZIP.
 				ix.Tracks = nil
+				for _, ct := range res.Tracks {
+					sub := tp
+					sub.ID = fmt.Sprintf("%s:%d", full, ct.Index)
+					sub.Title = ct.Title
+					sub.Container = "zip"
+					sub.ContainerMethod = ct.Method
+					sub.Codec = ct.Codec
+					sub.ByteStart = plan.ByteStart + ct.Offset
+					sub.ByteEnd = sub.ByteStart + ct.Size
+					sub.DurationSec = ct.DurationSec
+					sub.Source = SourceSniff
+					sub.Confidence = 0.8
+					sub.Pos = ct.Index
+					ix.Tracks = append(ix.Tracks, sub)
+				}
+				return nil
+			}
+			if len(res.Tracks) > 1 {
 				bytesPerSec := float64(res.SampleRate) * float64(res.Channels) * float64(bitDepthOr(res.BitDepth)) / 8
 				if bytesPerSec <= 0 {
 					bytesPerSec = 44100 * 2 * 2 / 8

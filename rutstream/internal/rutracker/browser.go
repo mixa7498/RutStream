@@ -44,6 +44,8 @@ var browserBinaries = []string{
 type BrowserOptions struct {
 	// ProfileDir — каталог профиля (куда сохраняются cookies, чтобы не логиниться заново).
 	ProfileDir string
+	// ProfileName — имя профиля внутри ProfileDir (для системного профиля Edge: "Default").
+	ProfileName string
 	// Headless — работать без окна.
 	Headless bool
 	// Proxy — прокси для браузера.
@@ -66,6 +68,10 @@ func NewBrowser(opts BrowserOptions) (*Browser, error) {
 	if opts.Timeout <= 0 {
 		opts.Timeout = 60 * time.Second
 	}
+	// По умолчанию — видимое окно: Cloudflare заметно агрессивнее к headless.
+	if v := os.Getenv("RUTSTREAM_HEADLESS"); v != "" && v != "0" && v != "false" {
+		opts.Headless = true
+	}
 	bin := opts.BinPath
 	if bin == "" {
 		bin = findBrowser()
@@ -77,6 +83,9 @@ func NewBrowser(opts BrowserOptions) (*Browser, error) {
 	if profile == "" {
 		profile = filepath.Join(os.TempDir(), "rutstream-browser-profile")
 	}
+	if v := os.Getenv("RUTSTREAM_BROWSER_PROFILE_NAME"); v != "" {
+		opts.ProfileName = v
+	}
 	if err := os.MkdirAll(profile, 0o755); err != nil {
 		return nil, err
 	}
@@ -85,6 +94,9 @@ func NewBrowser(opts BrowserOptions) (*Browser, error) {
 		UserDataDir(profile).
 		Set("disable-blink-features", "AutomationControlled").
 		Set("lang", "ru-RU")
+	if opts.ProfileName != "" {
+		l = l.Set("profile-directory", opts.ProfileName)
+	}
 	if opts.Proxy != "" {
 		l = l.Proxy(opts.Proxy)
 	}
@@ -92,7 +104,11 @@ func NewBrowser(opts BrowserOptions) (*Browser, error) {
 	if err != nil {
 		return nil, fmt.Errorf("запуск браузера: %w", err)
 	}
-	return &Browser{browser: rod.New().ControlURL(u), opts: opts}, nil
+	b := rod.New().ControlURL(u)
+	if err := b.Connect(); err != nil {
+		return nil, fmt.Errorf("подключение к браузеру: %w", err)
+	}
+	return &Browser{browser: b, opts: opts}, nil
 }
 
 // findBrowser ищет установленный Chrome/Edge.
@@ -107,9 +123,11 @@ func findBrowser() string {
 
 // Close закрывает браузер.
 func (b *Browser) Close() {
-	if b.browser != nil {
-		_ = b.browser.Close()
+	if b.browser == nil {
+		return
 	}
+	defer func() { _ = recover() }() // закрытие не должно ронять приложение
+	_ = b.browser.Close()
 }
 
 // Get открывает страницу и возвращает её HTML.
@@ -155,35 +173,53 @@ func (b *Browser) PostForm(ctx context.Context, url string, values map[string]st
 	}
 	defer page.Close()
 	page = page.Context(ctx)
-	if err := page.Timeout(b.opts.Timeout).WaitLoad(); err != nil {
-		return nil, err
+	// Ожидание загрузки: ошибку игнорируем — DOM может быть уже готов,
+	// а событие «load» не срабатывает, пока висят фоновые запросы.
+	_ = page.Timeout(15 * time.Second).WaitLoad()
+
+	// Ждём появления поля логина (rod повторяет поиск до таймаута контекста).
+	waitCtx, cancel := context.WithTimeout(ctx, b.opts.Timeout)
+	defer cancel()
+	page = page.Context(waitCtx)
+	if _, err := page.Element("input[name=username]"); err != nil {
+		return nil, fmt.Errorf("форма входа не найдена: %w", err)
 	}
 	for name, value := range values {
 		if strings.HasSuffix(name, ":submit") {
-			real := strings.TrimSuffix(name, ":submit")
-			el, err := page.Element(fmt.Sprintf("input[name=%q]", real))
-			if err != nil {
-				continue
-			}
-			_ = el.Click(proto.InputMouseButtonLeft, 1)
 			continue
 		}
 		el, err := page.Element(fmt.Sprintf("input[name=%q]", name))
 		if err != nil {
 			continue
 		}
-		_ = el.Input(value)
+		if err := el.Input(value); err != nil {
+			return nil, fmt.Errorf("заполнение поля %s: %w", name, err)
+		}
 	}
 	// Отправляем форму.
+	submitted := false
 	if el, err := page.Element("form input[type=submit], form button[type=submit]"); err == nil {
 		_ = el.Click(proto.InputMouseButtonLeft, 1)
-	} else if el, err := page.Element("form"); err == nil {
-		_, _ = el.Eval(`() => { document.querySelector('form').submit(); }`)
+		submitted = true
 	}
-	_ = page.Timeout(b.opts.Timeout).WaitLoad()
+	if !submitted {
+		if el, err := page.Element("form"); err == nil {
+			_, _ = el.Eval(`() => { document.querySelector('form').submit(); }`)
+			submitted = true
+		}
+	}
+	if !submitted {
+		return nil, fmt.Errorf("не найдена кнопка отправки формы")
+	}
+	// Ждём перехода на страницу после входа.
+	_ = page.Timeout(20 * time.Second).WaitNavigation(proto.PageLifecycleEventNameNetworkAlmostIdle)
+	_ = page.Timeout(10 * time.Second).WaitLoad()
 	html, err := page.HTML()
 	if err != nil {
 		return nil, err
+	}
+	if IsChallenge([]byte(html)) {
+		return nil, fmt.Errorf("%w: браузер не прошёл проверку Cloudflare", ErrChallenge)
 	}
 	return []byte(html), nil
 }

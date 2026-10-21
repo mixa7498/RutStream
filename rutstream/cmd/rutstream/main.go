@@ -15,6 +15,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -54,6 +55,8 @@ func main() {
 		err = cmdDownload(ctx, os.Args[2:])
 	case "history":
 		err = cmdHistory(ctx)
+	case "login":
+		err = cmdLogin(ctx)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -160,6 +163,51 @@ func (a *app) applySession() {
 		return
 	}
 	a.loggedIn = true
+}
+
+// cmdLogin — вход в rutracker.
+//
+// Форум закрыт Cloudflare-challenge для программных клиентов, поэтому есть
+// два пути:
+//  1) вход по логину/паролю (работает, если IP не вызывает проверку);
+//  2) импорт cookie из обычного браузера: приложение открывает страницу входа,
+//     пользователь входит и копирует cookie в буфер обмена.
+func cmdLogin(ctx context.Context) error {
+	a, err := newApp()
+	if err != nil {
+		return err
+	}
+	defer a.close()
+
+	user := os.Getenv("RUTSTREAM_USER")
+	pass := os.Getenv("RUTSTREAM_PASS")
+	if user != "" && pass != "" {
+		if err := a.client.Login(ctx, user, pass); err == nil {
+			fmt.Println("Вход выполнен. Сессия:", mask(a.client.SessionCookie()))
+			return nil
+		} else if !errors.Is(err, rutracker.ErrChallenge) {
+			return err
+		}
+		fmt.Println("Форма входа закрыта проверкой Cloudflare — включаем импорт из браузера.")
+	}
+
+	fmt.Println("Открываю страницу входа в вашем браузере…")
+	if err := rutracker.OpenLoginPage(a.client.Mirror()); err != nil {
+		return err
+	}
+	fmt.Println("  1) Войдите на rutracker.org")
+	fmt.Println("  2) Откройте консоль (F12) и выполните:  copy(document.cookie)")
+	fmt.Println("  3) Вернитесь сюда и нажмите Enter")
+	fmt.Print("  Ожидаю cookie из буфера обмена… ")
+
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if err := a.client.WaitForSessionCookie(waitCtx, 5*time.Minute); err != nil {
+		return err
+	}
+	fmt.Println("готово.")
+	fmt.Println("Сессия активна:", a.client.LoggedIn(ctx))
+	return nil
 }
 
 // ---------------------------------------------------------------- команды --
@@ -525,3 +573,11 @@ func formatName(f audio.Format) string {
 
 // bytesReader оборачивает срез байт в io.Reader.
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
+
+// mask скрывает значение cookie.
+func mask(s string) string {
+	if len(s) <= 6 {
+		return "***"
+	}
+	return s[:3] + "…" + s[len(s)-3:]
+}

@@ -255,6 +255,15 @@ func IsCueFile(path string) bool {
 	return cueExts[ext]
 }
 
+// containerExts — архивы, которые могут содержать треки.
+var containerExts = map[string]bool{".zip": true, ".rar": true, ".7z": true}
+
+// IsContainerFile сообщает, является ли путь архивом-контейнером.
+func IsContainerFile(path string) bool {
+	ext := strings.ToLower(extensionOf(path))
+	return containerExts[ext]
+}
+
 func extensionOf(path string) string {
 	i := strings.LastIndex(path, ".")
 	if i < 0 {

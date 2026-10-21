@@ -4,6 +4,7 @@ package playback
 
 import (
 	"bytes"
+	"compress/flate"
 	"context"
 	"fmt"
 	"io"
@@ -27,6 +28,12 @@ type Track struct {
 	ByteOffset int64
 	// Title — название трека.
 	Title string
+	// Container — контейнер внутри файла ("zip").
+	Container string
+	// ContainerMethod — метод сжатия внутри контейнера (8 — deflate).
+	ContainerMethod uint16
+	// ByteEnd — конец трека в байтах от начала файла.
+	ByteEnd int64
 }
 
 // Result — итог воспроизведения.
@@ -79,6 +86,11 @@ func (p *Player) PlayTrack(ctx context.Context, track Track, outFile string) (*R
 		}
 	}
 
+	// 3a. Трек внутри архива: вырезаем запись и распаковываем.
+	if track.Container == "zip" {
+		return p.playFromArchive(ctx, track, outFile)
+	}
+
 	// 4. Определяем формат по сигнатуре (первые 4 байта).
 	//
 	// Важно: после чтения заголовка НЕ делаем Seek(0) — поток торрента
@@ -119,4 +131,50 @@ func (p *Player) PlayTrack(ctx context.Context, track Track, outFile string) (*R
 // PlanForTrack готовит piece-план для трека (для оценки трафика).
 func PlanForTrack(info *metainfo.Info, track Track) (mediaindex.Plan, error) {
 	return mediaindex.PlanForFile(info, track.FileIdx)
+}
+
+// playFromArchive воспроизводит трек, лежащий внутри ZIP-архива раздачи.
+//
+// Скачивается только кусок архива с нужной записью; запись распаковывается
+// на лету (deflate), поэтому целиком архив качать не нужно.
+func (p *Player) playFromArchive(ctx context.Context, track Track, outFile string) (*Result, error) {
+	start := time.Now()
+	if err := p.session.SetWantedFiles([]int{track.FileIdx}); err != nil {
+		return nil, err
+	}
+	r, err := p.session.OpenFile(track.FileIdx)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	// Секция файла с нужной записью.
+	section := &seekSection{r: r, off: track.ByteOffset, length: track.ByteEnd - track.ByteOffset}
+	var stream io.Reader = section
+	if track.ContainerMethod == 8 {
+		stream = flate.NewReader(section)
+		defer flateReaderClose(stream)
+	}
+	res, err := audio.Play(stream, track.Codec, outFile)
+	if err != nil {
+		return nil, err
+	}
+	st := p.session.Stats()
+	return &Result{
+		Format:           res.Format,
+		Samples:          res.Samples,
+		DurationSec:      res.DurationSec,
+		Output:           res.Output,
+		Device:           res.Device,
+		BytesDownloaded:  st.BytesDownloaded,
+		TimeToFirstAudio: time.Since(start),
+		Elapsed:          time.Since(start),
+	}, nil
+}
+
+// flateReaderClose закрывает flate-ридер, если он это умеет.
+func flateReaderClose(r io.Reader) {
+	if c, ok := r.(io.Closer); ok {
+		_ = c.Close()
+	}
 }

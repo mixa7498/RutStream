@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -33,9 +35,17 @@ func runLogin(args []string) error {
 			return fmt.Errorf("задайте RUTSTREAM_USER и RUTSTREAM_PASS (или RUTSTREAM_COOKIE с готовой bb_session)")
 		}
 		if err := c.Login(ctx, user, pass); err != nil {
-			return err
+			if !errors.Is(err, rutracker.ErrChallenge) {
+				return err
+			}
+			fmt.Println("Cloudflare-challenge: вход через браузерный транспорт…")
+			if err := loginViaBrowser(ctx, c, user, pass); err != nil {
+				return err
+			}
+			fmt.Println("Вход выполнен через браузер, cookies перенесены в HTTP-клиент.")
+		} else {
+			fmt.Println("Вход по форме выполнен.")
 		}
-		fmt.Println("Вход по форме выполнен.")
 	}
 	fmt.Println("Сес bb_session:", mask(c.SessionCookie()))
 	fmt.Println("Авторизация активна:", c.LoggedIn(ctx))
@@ -181,4 +191,12 @@ func mask(s string) string {
 		return "***"
 	}
 	return s[:3] + "…" + s[len(s)-3:]
+}
+
+// browserProfileDir возвращает каталог профиля браузера (чтобы не логиниться заново).
+func browserProfileDir() string {
+	if dir := os.Getenv("RUTSTREAM_BROWSER_PROFILE"); dir != "" {
+		return dir
+	}
+	return filepath.Join(os.TempDir(), "rutstream-browser-profile")
 }

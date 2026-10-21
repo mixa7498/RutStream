@@ -46,6 +46,7 @@ func main() {
 		err = runSearch(os.Args[2:])
 	case "login":
 		err = runLogin(os.Args[2:])
+
 	case "topic":
 		err = runTopic(os.Args[2:])
 	case "files":

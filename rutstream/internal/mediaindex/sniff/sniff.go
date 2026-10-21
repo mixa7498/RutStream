@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // Track — трек внутри одного контейнера.
@@ -15,6 +16,12 @@ type Track struct {
 	Title       string
 	Offset      int64 // смещение в байтах от начала аудиоданных файла
 	DurationSec float64
+	// Size — размер данных трека (для записей внутри архива).
+	Size int64
+	// Codec — кодек трека (для записей внутри архива).
+	Codec string
+	// Method — метод сжатия (для ZIP: 0 — без сжатия, 8 — deflate).
+	Method uint16
 }
 
 // Result — результат разбора контейнера.
@@ -51,8 +58,83 @@ func Probe(r io.ReaderAt, size int64) (*Result, error) {
 		return probeMP3(r, size)
 	case len(head) >= 2 && head[0] == 0xFF && head[1]&0xE0 == 0xE0:
 		return probeMP3(r, size)
+	case len(head) >= 4 && string(head[0:4]) == "PK\x03\x04":
+		return probeZipResult(r, size)
 	}
 	return nil, ErrUnsupported
+}
+
+// probeZipResult превращает список записей ZIP-архива в карту треков.
+func probeZipResult(r io.ReaderAt, size int64) (*Result, error) {
+	entries, err := ProbeZip(r, size)
+	if err != nil {
+		return nil, err
+	}
+	res := &Result{Format: "zip", Codec: "zip", Tags: map[string]string{}}
+	for _, e := range entries {
+		if !e.IsAudio {
+			continue
+		}
+		codec := codecOfName(e.Name)
+		res.Tracks = append(res.Tracks, Track{
+			Index:  len(res.Tracks) + 1,
+			Title:  titleFromName(e.Name),
+			Offset: e.DataOffset,
+			// Длительность неизвестна до распаковки — оцениваем по размеру.
+			DurationSec: estimateDuration(e.UncompressedSize),
+			Size:         e.UncompressedSize,
+			Codec:        codec,
+			Method:       e.Method,
+		})
+	}
+	if len(res.Tracks) == 0 {
+		return res, fmt.Errorf("%w: в архиве нет аудиофайлов", ErrUnsupported)
+	}
+	return res, nil
+}
+
+// codecOfName определяет кодек по расширению имени файла.
+func codecOfName(name string) string {
+	lower := strings.ToLower(name)
+	switch {
+	case strings.HasSuffix(lower, ".flac"):
+		return "flac"
+	case strings.HasSuffix(lower, ".mp3"):
+		return "mp3"
+	case strings.HasSuffix(lower, ".m4a"), strings.HasSuffix(lower, ".alac"):
+		return "aac"
+	case strings.HasSuffix(lower, ".ape"):
+		return "ape"
+	case strings.HasSuffix(lower, ".wv"):
+		return "wavpack"
+	case strings.HasSuffix(lower, ".ogg"), strings.HasSuffix(lower, ".oga"):
+		return "ogg"
+	case strings.HasSuffix(lower, ".opus"):
+		return "opus"
+	case strings.HasSuffix(lower, ".wav"):
+		return "wav"
+	}
+	return "unknown"
+}
+
+// titleFromName убирает путь и расширение из имени файла.
+func titleFromName(p string) string {
+	name := p
+	if i := strings.LastIndexAny(name, "/\\"); i >= 0 {
+		name = name[i+1:]
+	}
+	if i := strings.LastIndex(name, "."); i > 0 {
+		name = name[:i]
+	}
+	return name
+}
+
+// estimateDuration грубо оценивает длительность по размеру (lossless ≈ 0.8 МБ на минуту).
+func estimateDuration(size int64) float64 {
+	if size <= 0 {
+		return 0
+	}
+	return float64(size) / (0.8 * 1024 * 1024) * 60
 }
 
 func min64(a, b int64) int64 {

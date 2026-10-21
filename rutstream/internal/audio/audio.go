@@ -150,12 +150,27 @@ func (d *Decoder) readFLAC(p []byte) (int, error) {
 		if nch == 0 {
 			continue
 		}
-		nsamples := len(f.Subframes[0].Samples)
+		// Число сэмплов берём из NSamples: у CONSTANT-субфрейма в Samples лежит
+		// одно значение, а не весь кадр.
+		nsamples := f.Subframes[0].NSamples
+		if nsamples <= 0 {
+			nsamples = len(f.Subframes[0].Samples)
+		}
 		need := nsamples * nch * 2
 		buf := make([]byte, 0, need)
 		for i := 0; i < nsamples; i++ {
 			for ch := 0; ch < nch; ch++ {
-				v := f.Subframes[ch].Samples[i]
+				sf := f.Subframes[ch]
+				var v int32
+				switch {
+				case len(sf.Samples) >= nsamples:
+					v = sf.Samples[i]
+				case len(sf.Samples) == 1:
+					// CONSTANT-субфрейм: одно значение на весь кадр.
+					v = sf.Samples[0]
+				case len(sf.Samples) > 0:
+					v = sf.Samples[i%len(sf.Samples)]
+				}
 				var b [2]byte
 				binary.LittleEndian.PutUint16(b[:], uint16(int16(v)))
 				buf = append(buf, b[0], b[1])

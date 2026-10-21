@@ -29,6 +29,8 @@ func NewWAVWriter(path string, format Format) (*WAVWriter, error) {
 		return nil, err
 	}
 	w := &WAVWriter{f: f, format: format, headerSize: 44}
+	// Заголовок пишем обычным Write — он должен занимать первые 44 байта файла,
+	// а данные идти после него (WriteAt сдвинул бы позицию файла).
 	if err := w.writeHeader(0); err != nil {
 		f.Close()
 		return nil, err
@@ -52,7 +54,11 @@ func (w *WAVWriter) writeHeader(dataLen int64) error {
 	binary.LittleEndian.PutUint16(h[34:36], 16)
 	copy(h[36:40], "data")
 	binary.LittleEndian.PutUint32(h[40:44], uint32(dataLen))
-	_, err := w.f.WriteAt(h[:], 0)
+	if _, err := w.f.Write(h[:]); err != nil {
+		return err
+	}
+	// Заголовок занимает первые 44 байта — данные идём после него.
+	_, err := w.f.Seek(44, io.SeekStart)
 	return err
 }
 
@@ -65,7 +71,23 @@ func (w *WAVWriter) Write(p []byte) (int, error) {
 
 // Close дописывает заголовок с итоговым размером и закрывает файл.
 func (w *WAVWriter) Close() error {
-	if err := w.writeHeader(w.written); err != nil {
+	// Перезаписываем заголовок (размеры) в начало файла.
+	var h [44]byte
+	copy(h[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(h[4:8], uint32(36+w.written))
+	copy(h[8:12], "WAVE")
+	copy(h[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(h[16:20], 16)
+	binary.LittleEndian.PutUint16(h[20:22], 1)
+	binary.LittleEndian.PutUint16(h[22:24], uint16(w.format.Channels))
+	binary.LittleEndian.PutUint32(h[24:28], uint32(w.format.SampleRate))
+	byteRate := w.format.SampleRate * w.format.Channels * 2
+	binary.LittleEndian.PutUint32(h[28:32], uint32(byteRate))
+	binary.LittleEndian.PutUint16(h[32:34], uint16(w.format.Channels*2))
+	binary.LittleEndian.PutUint16(h[34:36], 16)
+	copy(h[36:40], "data")
+	binary.LittleEndian.PutUint32(h[40:44], uint32(w.written))
+	if _, err := w.f.WriteAt(h[:], 0); err != nil {
 		w.f.Close()
 		return err
 	}
