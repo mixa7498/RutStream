@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"sort"
 	"strings"
 )
 
@@ -129,7 +128,7 @@ func ProbeZip(r io.ReaderAt, size int64) ([]ZipEntry, error) {
 		extraLen := int64(binary.LittleEndian.Uint16(lh[28:30]))
 		e.DataOffset = e.LocalHeaderOffset + 30 + nameLen + extraLen
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	// Порядок записей сохраняем: в архиве он соответствует порядку треков альбома.
 	return entries, nil
 }
 
