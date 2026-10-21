@@ -13,6 +13,9 @@ import (
 var magnetRe = regexp.MustCompile(`magnet:\?xt=urn:btih:([A-Za-z0-9]+)`)
 var trackerRe = regexp.MustCompile(`tr=([A-Za-z0-9%:\/\.\+\-]+)`)
 var trackLineRe = regexp.MustCompile(`^\s*(\d{1,3})[\.\)\-–—\s]+(.+?)\s*(?:[—\-–|]\s*(\d{1,2}:\d{2}(?::\d{2})?))?\s*$`)
+
+// brSplitRe делит HTML по тегам переноса строки.
+var brSplitRe = regexp.MustCompile(`(?i)<br\s*/?>`)
 var durationRe = regexp.MustCompile(`^(\d{1,2}):(\d{2})(?::(\d{2}))?$`)
 
 // Topic загружает и разбирает страницу темы.
@@ -57,33 +60,84 @@ func ParseTopic(page []byte) (*Topic, error) {
 	}
 
 	// Метаданные: пары «Метка: значение» в span.post-b.
-	for _, label := range []string{"Исполнитель", "Автор", "Художник", "Альбом", "Год", "Жанр", "Формат", "Битрейт", "Длительность", "Качество", "Метка", "Релиз", "Лейбл", "Страна"} {
-		v := postMeta(doc, label)
-		if v == "" {
-			continue
-		}
-		switch label {
-		case "Исполнитель", "Автор", "Художник":
-			t.Artist = v
-		case "Альбом":
-			t.Album = v
-		case "Год":
-			t.Year = v
-		case "Жанр":
-			t.Genre = v
-		case "Формат":
-			t.Format = v
-		case "Битрейт":
-			t.Bitrate = v
-		case "Длительность":
-			t.Duration = v
-		case "Качество":
-			t.Quality = v
+	// Набор подписей различается для разных разделов, поэтому ищем по списку.
+	metaLabels := []struct {
+		labels []string
+		field  *string
+	}{
+		{[]string{"Исполнитель (группы)", "Исполнитель", "Автор", "Художник"}, &t.Artist},
+		{[]string{"Альбом", "Название диска"}, &t.Album},
+		{[]string{"Год издания", "Год"}, &t.Year},
+		{[]string{"Жанр", "Стиль"}, &t.Genre},
+		{[]string{"Аудиокодек", "Формат"}, &t.Format},
+		{[]string{"Битрейт"}, &t.Bitrate},
+		{[]string{"Продолжительность", "Длительность"}, &t.Duration},
+		{[]string{"Тип рипа", "Качество"}, &t.Quality},
+	}
+	for _, m := range metaLabels {
+		for _, label := range m.labels {
+			if v := postMeta(doc, label); v != "" {
+				*m.field = v
+				break
+			}
 		}
 	}
 
 	t.Tracks = parseTracklist(doc)
+
+	// Исполнитель и альбом часто указаны только в заголовке темы
+	// («(Жанр) [ИСТОЧНИК] Исполнитель - Альбом - Год, ФОРМАТ, …»).
+	if t.Artist == "" || t.Album == "" {
+		artist, album, year := SplitArtistAlbum(t.Title)
+		if t.Artist == "" {
+			t.Artist = artist
+		}
+		if t.Album == "" {
+			t.Album = album
+		}
+		if t.Year == "" && year != "" {
+			t.Year = year
+		}
+	}
 	return t, nil
+}
+
+// SplitArtistAlbum разбирает заголовок раздачи на исполнителя, альбом и год.
+//
+// Формат rutracker: «(Жанр) [ИСТОЧНИК] Исполнитель - Альбом - Год, ФОРМАТ, …».
+func SplitArtistAlbum(title string) (artist, album, year string) {
+	t := strings.TrimSpace(title)
+	// Отбрасываем ведущий блок в квадратных скобках (источник) и в круглых (жанр).
+	for {
+		trimmed := false
+		if strings.HasPrefix(t, "[") {
+			if i := strings.Index(t, "]"); i > 0 {
+				t = strings.TrimSpace(t[i+1:])
+				trimmed = true
+			}
+		}
+		if strings.HasPrefix(t, "(") {
+			if i := strings.Index(t, ")"); i > 0 {
+				t = strings.TrimSpace(t[i+1:])
+				trimmed = true
+			}
+		}
+		if !trimmed {
+			break
+		}
+	}
+	// Отрезаем хвост с форматом и годом.
+	if i := strings.Index(t, ","); i > 0 {
+		t = t[:i]
+	}
+	if y := YearOfTitle(t); y > 0 {
+		year = strconv.Itoa(y)
+	}
+	parts := strings.SplitN(t, " - ", 2)
+	if len(parts) == 2 {
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), year
+	}
+	return "", strings.TrimSpace(t), year
 }
 
 // postMeta извлекает значение метки «Метка: значение» из блока темы.
@@ -130,11 +184,56 @@ func nextTextNode(sel *goquery.Selection) string {
 }
 
 // parseTracklist извлекает список треков из тела темы.
+//
+// Актуальная вёрстка форума: блок «Треклист» (div.sp-body), где треки идут
+// отдельными строками, разделёнными <br>, а заголовок диска — строка без номера.
+// Поддерживается и старая табличная вёрстка.
 func parseTracklist(doc *goquery.Document) []SiteTrack {
 	var out []SiteTrack
 	seen := map[string]bool{}
 
-	// 1) Таблицы в теле темы (phpBB3: div.post_body).
+	// 1) Блок «Треклист» с построчным разбором.
+	if body := findTracklistBlock(doc); body != nil {
+		html, err := body.Html()
+		if err == nil {
+			disc := 0
+			for _, chunk := range brSplitRe.Split(html, -1) {
+				line := stripTags(chunk)
+				line = strings.TrimSpace(strings.Join(strings.Fields(line), " "))
+				line = strings.TrimSpace(strings.TrimLeft(line, ">/"))
+				if line == "" {
+					continue
+				}
+				if m := trackLineRe.FindStringSubmatch(line); m != nil {
+					num, _ := strconv.Atoi(m[1])
+					title := cleanTitle(m[2])
+					title = strings.TrimSuffix(title, ".flac")
+					title = strings.TrimSuffix(title, ".mp3")
+					if title == "" {
+						continue
+					}
+					key := strconv.Itoa(num) + "|" + title
+					if seen[key] {
+						continue
+					}
+					seen[key] = true
+					out = append(out, SiteTrack{Pos: num, Title: title, Disc: disc,
+						Duration: parseDuration(m[3])})
+					continue
+				}
+				// Строка без номера — заголовок диска.
+				if !strings.Contains(line, ".") || strings.Contains(line, "CD") ||
+					strings.Contains(line, "Диск") || strings.Contains(line, "Disc") {
+					disc++
+				}
+			}
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+
+	// 2) Старая табличная вёрстка.
 	doc.Find("div.post_body table, div.postBody table, div.content table, table.torrent").Each(func(_ int, tbl *goquery.Selection) {
 		tbl.Find("tr").Each(func(_ int, tr *goquery.Selection) {
 			cells := tr.Find("td, th")
@@ -175,33 +274,39 @@ func parseTracklist(doc *goquery.Document) []SiteTrack {
 			out = append(out, st)
 		})
 	})
-
-	if len(out) > 0 {
-		return out
-	}
-
-	// 2) Строки вида «01. Название — 3:45» в тексте.
-	doc.Find("div.post_body, div.postBody, .post_body").Each(func(_ int, body *goquery.Selection) {
-		lines := strings.Split(body.Text(), "\n")
-		for _, line := range lines {
-			m := trackLineRe.FindStringSubmatch(line)
-			if m == nil {
-				continue
-			}
-			num, _ := strconv.Atoi(m[1])
-			title := cleanTitle(m[2])
-			if title == "" {
-				continue
-			}
-			key := strconv.Itoa(num) + "|" + title
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			out = append(out, SiteTrack{Pos: num, Title: title, Duration: parseDuration(m[3])})
-		}
-	})
 	return out
+}
+
+// findTracklistBlock находит блок с треклистом.
+func findTracklistBlock(doc *goquery.Document) *goquery.Selection {
+	// Ищем заголовок «Треклист» и берём следующий спойлер.
+	var body *goquery.Selection
+	doc.Find("div.sp-wrap, div.sp-head, span.post-b").EachWithBreak(func(_ int, s *goquery.Selection) bool {
+		if strings.TrimSpace(s.Text()) == "Треклист" {
+			if wrap := s.Closest("div.sp-wrap"); wrap.Length() > 0 {
+				if b := wrap.Find("div.sp-body").First(); b.Length() > 0 {
+					body = b
+					return false
+				}
+			}
+			if b := s.Next(); b.Length() > 0 {
+				body = b
+				return false
+			}
+		}
+		return true
+	})
+	return body
+}
+
+// stripTags убирает HTML-теги и декодирует сущности.
+func stripTags(s string) string {
+	s = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(s, " ")
+	s = strings.ReplaceAll(s, "&nbsp;", " ")
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&quot;", "\"")
+	s = strings.ReplaceAll(s, "&#39;", "'")
+	return s
 }
 
 func cleanTitle(s string) string {

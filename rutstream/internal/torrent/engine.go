@@ -21,7 +21,9 @@ import (
 	bt "github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/dialer"
+	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/storage"
 	"github.com/mixa7/rutstream/internal/mediaindex"
 	"golang.org/x/net/proxy"
 	"golang.org/x/time/rate"
@@ -118,6 +120,18 @@ func New(opts Options) (*Engine, error) {
 	cl, err := bt.NewClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("создание BT-клиента: %w", err)
+	}
+	// Хранилище: пишем сразу в финальные файлы, без промежуточных «.part».
+	//
+	// Почему: при потоковом чтении мы держим файл открытым, а Windows не
+	// позволяет переименовать открытый файл — anacrolix не смог бы перевести
+	// «X.flac.part» в «X.flac» и получал «Access is denied».
+	if opts.DataDir != "" {
+		fs := storage.NewFileOpts(storage.NewFileClientOpts{
+			ClientBaseDir: opts.DataDir,
+			UsePartFiles:  g.Option[bool]{Value: false, Ok: true},
+		})
+		cfg.DefaultStorage = fs
 	}
 	if proxyDialer != nil {
 		cl.AddDialer(proxyDialer)
