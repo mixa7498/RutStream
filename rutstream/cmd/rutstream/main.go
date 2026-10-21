@@ -59,6 +59,8 @@ func main() {
 		err = cmdHistory(ctx)
 	case "login":
 		err = cmdLogin(ctx)
+	case "check":
+		err = cmdCheck(ctx)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -146,12 +148,22 @@ func (a *app) close() {
 	a.store.Close()
 }
 
-// applySession переносит учётные данные из окружения.
+// applySession переносит учётные данные из окружения или из сохранённого файла.
 func (a *app) applySession() {
 	if ck := strings.TrimSpace(os.Getenv("RUTSTREAM_COOKIE")); ck != "" {
 		a.client.SetSessionCookie(ck)
 		a.loggedIn = true
 		return
+	}
+	// Сохранённая с прошлого раза сессия.
+	if data, err := os.ReadFile(a.sessionFile()); err == nil && len(data) > 0 {
+		text := string(data)
+		a.client.SetCookieSet(rutracker.ExtractCookieSet(text))
+		if ck := rutracker.ExtractSessionCookie(text); ck != "" {
+			a.client.SetSessionCookie(ck)
+			a.loggedIn = true
+			return
+		}
 	}
 	user := os.Getenv("RUTSTREAM_USER")
 	pass := os.Getenv("RUTSTREAM_PASS")
@@ -165,6 +177,16 @@ func (a *app) applySession() {
 		return
 	}
 	a.loggedIn = true
+}
+
+// sessionFile — путь к файлу с сохранёнными cookie.
+func (a *app) sessionFile() string {
+	return filepath.Join(a.dataDir, "session.cookie")
+}
+
+// saveSession сохраняет cookie на диск (вход — один раз).
+func (a *app) saveSession(text string) error {
+	return os.WriteFile(a.sessionFile(), []byte(strings.TrimSpace(text)), 0o600)
 }
 
 // cmdLogin — вход в rutracker.
@@ -197,9 +219,12 @@ func cmdLogin(ctx context.Context) error {
 	if err := rutracker.OpenLoginPage(a.client.Mirror()); err != nil {
 		return err
 	}
-	fmt.Println("  1) Войдите на rutracker.org")
-	fmt.Println("  2) Откройте консоль (F12) и выполните:  copy(document.cookie)")
-	fmt.Println("  3) Вернитесь сюда и нажмите Enter")
+	fmt.Println("  1) Войдите на rutracker.org (убедитесь, что в правом верхнем углу ваш ник)")
+	fmt.Println("  2) Скопируйте cookie одним из способов:")
+	fmt.Println("     а) DevTools → Application → Cookies → rutracker.org → bb_session → Value")
+	fmt.Println("     б) DevTools → Network → любой запрос → Headers → строка Cookie → скопировать всё")
+	fmt.Println("     (в варианте «б» попадёт и cf_clearance — с ней обычный клиент проходит Cloudflare)")
+	fmt.Println("  3) Скопируйте выделенное (Ctrl+C) и вернитесь сюда")
 	fmt.Print("  Ожидаю cookie из буфера обмена… ")
 
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -209,6 +234,42 @@ func cmdLogin(ctx context.Context) error {
 	}
 	fmt.Println("готово.")
 	fmt.Println("Сессия активна:", a.client.LoggedIn(ctx))
+	// Сохраняем cookie, чтобы вход был одноразовым.
+	if text, err := rutracker.ReadClipboard(); err == nil {
+		if err := a.saveSession(text); err != nil {
+			fmt.Fprintln(os.Stderr, "не удалось сохранить сессию:", err)
+		} else {
+			fmt.Println("Сессия сохранена:", a.sessionFile())
+		}
+	}
+	return nil
+}
+
+// cmdCheck проверяет доступ: авторизация, разделы, защищённая страница.
+func cmdCheck(ctx context.Context) error {
+	a, err := newApp()
+	if err != nil {
+		return err
+	}
+	defer a.close()
+
+	fmt.Printf("зеркало:            %s\n", a.client.Mirror())
+	fmt.Printf("bb_session:         %s\n", mask(a.client.SessionCookie()))
+	fmt.Printf("cf_clearance:       %v\n", a.client.HasClearance())
+	fmt.Printf("авторизация:        %v\n", a.client.LoggedIn(ctx))
+
+	// Защищённая страница (обычно закрыта Cloudflare-challenge без сессии).
+	if _, err := a.client.Topic(ctx, 6924752); err != nil {
+		fmt.Printf("чтение темы:        ошибка: %v\n", err)
+	} else {
+		fmt.Println("чтение темы:        ок")
+	}
+	// Поиск.
+	if topics, err := a.client.Search(ctx, "radiohead", 1698, 0); err != nil {
+		fmt.Printf("поиск:              ошибка: %v\n", err)
+	} else {
+		fmt.Printf("поиск:              ок, найдено %d\n", len(topics))
+	}
 	return nil
 }
 
