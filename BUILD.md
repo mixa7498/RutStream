@@ -1,53 +1,92 @@
 # Сборка и запуск RutStream
 
+> **Важно про окружение этой машины.** Включён **Windows Smart App Control**
+> (`VerifiedAndReputablePolicyState = 1`): он блокирует запуск новых
+> неподписанных исполняемых файлов — включая `go test` и даже `compile.exe`.
+> Политику ОС обходить нельзя, поэтому **разработка и проверки выполняются в WSL**,
+> а Windows-сборка используется только как артефакт для запуска у пользователя
+> (после снятия блокировки или с подписью от публичного CA).
+
 ## 1. Требования
 
 | Компонент | Версия | Зачем |
 |---|---|---|
-| Go | 1.24+ (проверено на 1.27.3) | сборка |
-| ffmpeg | 6/7 (опционально) | AAC/ALAC/APE/WavPack/DSD, которые не умеет встроенный декодер |
-| Браузер | Chrome или Edge | только для ручного импорта cookie (см. §4) |
+| Go | 1.24+ (проверено 1.27.3) | сборка |
+| WSL2 (Ubuntu) | — | среда сборки и запуска тестов на этой машине |
+| ffmpeg | 6/7 (опционально) | AAC/ALAC/APE/WavPack/DSD — их не умеет встроенный декодер |
+| Браузер | Chrome или Edge | только для ручного импорта cookie (см. §5) |
 
-## 2. Сборка
+## 2. Сборка и тесты в WSL (основной цикл)
 
 ```powershell
-# Go (если не установлен в системе)
-$env:GOPATH="$env:TEMP\opencode\gopath"
-$env:GOMODCACHE="$env:GOPATH\pkg\mod"
-$env:GOCACHE="$env:GOPATH\build-cache"
-$go="$env:TEMP\opencode\go\bin\go.exe"   # либо просто `go`
-
-cd C:\Users\mixa7\Documents\RutStream\rutstream
-
-# Основное приложение
-& $go build -ldflags "-s -w" -o bin\rutstream.exe ./cmd/rutstream
-# Стенд проверок Phase 0
-& $go build -ldflags "-s -w" -o bin\spike.exe ./cmd/spike
+# автоматически: синхронизация проекта + сборка + тесты
+powershell -ExecutionPolicy Bypass -File tools\sync-wsl.ps1
 ```
 
-> **Важно: `-ldflags "-s -w"` обязателен.** Без удаления таблицы символов
-> Windows Smart App Control / Code Integrity может отклонить исполняемый файл
-> (см. §5). Собранные с этими флагами бинарники запускаются штатно.
+Вручную:
 
-## 3. Переменные окружения
+```powershell
+$proj = "C:\Users\mixa7\Documents\RutStream\rutstream"
+
+# 1) копируем исходники в WSL через tar-пайп (диски Windows в WSL не смонтированы)
+cmd /c "tar -cf - --exclude=bin --exclude=.git -C ""$proj"" . | wsl.exe -d Ubuntu -e sh -lc ""mkdir -p /home/cholobobo/rutstream && tar -C /home/cholobobo/rutstream -xf -"""
+
+# 2) сборка и тесты
+wsl -d Ubuntu -e sh -lc "cd /home/cholobobo/rutstream && export PATH=$HOME/go/bin:$PATH GOPATH=$HOME/gopath GOMODCACHE=$HOME/gomod GOCACHE=$HOME/.cache/go-build GOPROXY=file://$HOME/gomod/cache/download GOSUMDB=off GOFLAGS=-mod=mod CGO_ENABLED=0 && go build -tags nodevice ./... && go test -tags nodevice ./..."
+```
+
+Подготовка окружения WSL (однократно):
+
+```bash
+# Go
+curl -sSLo /tmp/go.tgz https://go.dev/dl/go1.27.3.linux-amd64.tar.gz
+tar -C ~ -xzf /tmp/go.tgz && rm /tmp/go.tgz
+export PATH=$HOME/go/bin:$PATH
+
+# кэш модулей: на Windows это %TEMP%\opencode\gopath\pkg\mod\cache\download —
+# его можно использовать как file-based GOPROXY
+```
+
+Тег `nodevice` отключает зависимость от звуковой карты (`oto` требует ALSA/ALSA-dev).
+Без него сборка на Windows и macOS работает как есть.
+
+## 3. Сборка приложения для Windows
+
+```powershell
+$env:GOPATH="$env:TEMP\opencode\gopath"; $env:GOMODCACHE="$env:GOPATH\pkg\mod"; $env:GOCACHE="$env:GOPATH\build-cache"
+$go="$env:TEMP\opencode\go\bin\go.exe"      # либо просто `go`
+
+cd C:\Users\mixa7\Documents\RutStream\rutstream
+& $go build -ldflags "-s -w" -o bin\rutstream.exe ./cmd/rutstream
+& $go build -ldflags "-s -w" -o bin\spike.exe     ./cmd/spike
+```
+
+> **Важно: `-ldflags "-s -w"` обязателен.** С полной таблицей символов Code Integrity
+> отклоняет файл («did not meet the Enterprise signing level requirements»).
+
+> На этой машине компилятор Go тоже блокируется политикой, поэтому Windows-сборку
+> выполняйте на машине без Smart App Control либо в WSL с `GOOS=windows`:
+> ```bash
+> GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o rutstream.exe ./cmd/rutstream
+> ```
+
+## 4. Переменные окружения
 
 | Переменная | Назначение |
 |---|---|
-| `RUTSTREAM_USER` / `RUTSTREAM_PASS` | логин и пароль rutracker (для входа по форме) |
+| `RUTSTREAM_USER` / `RUTSTREAM_PASS` | логин и пароль rutracker (вход по форме) |
 | `RUTSTREAM_COOKIE` | готовая cookie `bb_session` (альтернатива логину) |
-| `RUTSTREAM_PROXY` | `socks5://host:port` или `http://host:port` — для сайта и для P2P-пиров |
+| `RUTSTREAM_PROXY` | `socks5://host:port` или `http://host:port` — и для сайта, и для P2P-пиров |
 | `RUTSTREAM_DATA` | каталог данных (по умолчанию `%APPDATA%\RutStream`) |
 
-## 4. Авторизация на rutracker
+## 5. Авторизация на rutracker
 
-Форум закрыт Cloudflare-challenge для «не-браузерных» клиентов, поэтому
-предусмотрены два пути:
+Форум закрыт Cloudflare-challenge для «не-браузерных» клиентов, поэтому два пути:
 
 **Путь A — импорт cookie (рекомендуется).**
 1. Войдите на rutracker в обычном браузере.
-2. Откройте DevTools → Application → Cookies → `rutracker.org` → `bb_session`.
-3. Скопируйте значение и передайте его:
-   ```powershell
+2. DevTools → Application → Cookies → `rutracker.org` → `bb_session` → скопируйте значение.
+3. ```powershell
    $env:RUTSTREAM_COOKIE = "0-xxxxxxxx-xxxxxxxxxxxx"
    ```
 
@@ -58,50 +97,35 @@ $env:RUTSTREAM_PASS = "ваш_пароль"
 ```
 Если страница логина отдаёт challenge — используйте путь A.
 
-## 5. Windows Smart App Control (важно)
+## 6. Smart App Control: что делать, чтобы приложение запускалось
 
-На машине разработки включён **Smart App Control**
-(`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy\VerifiedAndReputablePolicyState = 1`).
-Он блокирует запуск **новых неподписанных** исполняемых файлов:
-
+Диагностика (журнал Code Integrity):
+```powershell
+Get-WinEvent -LogName "Microsoft-Windows-CodeIntegrity/Operational" -MaxEvents 5 |
+  Select-Object TimeCreated, Message
+Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy" |
+  Select-Object VerifiedAndReputablePolicyState
 ```
-Code Integrity determined that a process ... attempted to load ...\probe2.exe
-that did not meet the Enterprise ... policy
-```
 
-Наблюдаемое поведение:
-- бинарники, **уже запускавшиеся** ранее, продолжают работать (их хеш попал в кэш репутации);
-- **любая новая сборка** (даже «hello world») блокируется;
-- блокировка касается и `go test` (запуск тест-бинаря).
-
-Это политика безопасности ОС, и обходить её не следует. Варианты:
+Варианты:
 
 1. **Отключить Smart App Control** (нужны права администратора):
-   «Параметры Windows» → «Безопасность Windows» → «Защита от вирусов и угроз» →
-   «Параметры защиты от вирусов и угроз» → «Управление приложениями и браузером» →
-   «Управление приложениями» → «Управление приложениями Smart App Control» → «Выключить».
-   Либо из PowerShell **от администратора**:
-   ```powershell
-   Set-MpPreference -EnableSmartAppControl Off   # не все сборки Windows это поддерживают
-   ```
-2. **Подписать приложение** доверенным сертификатом — тогда оно запускается
-   на любой машине с SAC (см. §6).
-3. Собирать и тестировать в среде без этой политики (WSL/Docker/CI).
+   «Параметры Windows» → «Безопасность Windows» → «Параметры защиты от вирусов и угроз» →
+   «Управление приложениями и браузером» → «Управление приложениями» →
+   «Управление приложениями Smart App Control» → «Выключить».
+2. **Подписать приложение сертификатом публичного CA** — тогда SAC доверяет приложению
+   автоматически на любой машине (нужна покупка OV/EV code signing сертификата).
+   Самоподпись **не подходит**: SAC требует «Enterprise signing level», то есть цепочку
+   до CA из программы Microsoft Trusted Root.
+3. Проверять и тестировать в среде без этой политики (WSL/CI).
 
-## 6. Подпись приложения (для релиза)
-
+Самоподпись (полезна для «доверенного» запуска в профиле пользователя, но не для SAC):
 ```powershell
-# Самоподписанный сертификат (для личного использования).
-# Импорт сертификата в «Доверенные корневые центры» требует прав администратора.
 $cert = New-SelfSignedCertificate -Subject "CN=RutStream" -Type CodeSigningCert `
-        -CertStoreLocation Cert:\CurrentUser\My
-
-signtool sign /sha1 $cert.Thumbprint /fd SHA256 /tr http://timestamp.digicert.com `
-        /td SHA256 bin\rutstream.exe
+        -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable
+certutil -user -addstore Root "$env:TEMP\rutstream.cer"
+Set-AuthenticodeSignature -FilePath bin\rutstream.exe -Certificate $cert -HashAlgorithm SHA256
 ```
-
-Для публичного релиза — сертификат от публичного CA (тогда SAC доверяет приложению
-автоматически) либо упаковка в MSIX с подписью.
 
 ## 7. Проверочный стенд (Phase 0)
 
@@ -114,16 +138,15 @@ signtool sign /sha1 $cert.Thumbprint /fd SHA256 /tr http://timestamp.digicert.co
 .\bin\spike.exe files 6924752   # список файлов раздачи
 ```
 
-## 8. Тесты
+## 8. Приложение
 
 ```powershell
-& $go test -ldflags "-s -w" ./...
-```
-
-Если сборка тестов блокируется политикой — запускайте уже собранный
-тест-бинарь:
-
-```powershell
-& $go test -c -ldflags "-s -w" -o bin\rt.test.exe ./internal/rutracker
-.\bin\rt.test.exe "-test.v=true"
+$env:RUTSTREAM_COOKIE = "<bb_session>"
+.\bin\rutstream.exe forums                       # дерево разделов музыки
+.\bin\rutstream.exe search beatles 1698          # поиск раздач
+.\bin\rutstream.exe show <topicID>               # метаданные и треклист
+.\bin\rutstream.exe plan <topicID>               # что и сколько скачается
+.\bin\rutstream.exe play <topicID> 7             # потоковое воспроизведение трека №7
+.\bin\rutstream.exe download <topicID> 7         # скачать трек целиком
+.\bin\rutstream.exe history                      # история прослушиваний
 ```

@@ -37,12 +37,18 @@ func TestMultiReaderScenario(t *testing.T) {
 		t.Fatalf("flac.New: %v", err)
 	}
 	t.Logf("STREAMINFO: rate=%d samples=%d", stream.Info.SampleRate, stream.Info.NSamples)
-	for i := 0; i < 5; i++ {
-		if _, err := stream.ParseNext(); err != nil {
-			t.Fatalf("кадр %d: %v", i, err)
+	frames := 0
+	for {
+		_, err := stream.ParseNext()
+		if err != nil {
+			if err == io.EOF {
+				t.Logf("разобрано кадров: %d (до EOF)", frames)
+				break
+			}
+			t.Fatalf("кадр %d: %v", frames, err)
 		}
+		frames++
 	}
-	t.Log("кадры разбираются нормально")
 }
 
 // torrentReader поднимает локальную раздачу с одним FLAC-файлом и

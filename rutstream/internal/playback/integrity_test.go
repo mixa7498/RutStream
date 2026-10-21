@@ -1,21 +1,23 @@
 package playback
 
 import (
+	"bytes"
 	"context"
-	"fmt"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/mewkiz/flac"
 	"github.com/mixa7/rutstream/internal/testutil"
 	"github.com/mixa7/rutstream/internal/torrent"
 )
 
-// TestFLACParseFromTorrent диагностика: FLAC-парсер поверх потока торрента.
-func TestFLACParseFromTorrent(t *testing.T) {
+// TestMultiReaderIntegrity проверяет, что поток «4 байта + MultiReader»
+// отдаёт ровно те же байты, что и исходный файл.
+func TestMultiReaderIntegrity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("нужна сеть")
 	}
@@ -24,14 +26,17 @@ func TestFLACParseFromTorrent(t *testing.T) {
 		t.Skip("нет тестового FLAC")
 	}
 	ctx := context.Background()
-	tmp, err := os.MkdirTemp("", "rutstream-flac-")
+	tmp, err := os.MkdirTemp("", "rutstream-int-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmp)
 
 	albumName := "Artist - Album (2024) [FLAC]"
-	files := []testutil.GeneratedFile{{Path: "CD1/01 - Real Track.flac", Size: fileSize(sample)}}
+	files := []testutil.GeneratedFile{
+		{Path: "CD1/01 - Real Track.flac", Size: fileSize(sample)},
+		{Path: "CD1/02 - Other.flac", Size: 8 << 20},
+	}
 	mi, err := testutil.MakeTorrentWithContent(albumName, files, 256*1024, tmp, map[string]string{
 		"CD1/01 - Real Track.flac": sample,
 	})
@@ -81,45 +86,29 @@ func TestFLACParseFromTorrent(t *testing.T) {
 	}
 	defer r.Close()
 
-	// Считаем позицию вручную, чтобы знать, где произошла ошибка.
-	counter := &countingReader{r: r}
-	stream, err := flac.New(counter)
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(r, head); err != nil {
+		t.Fatal(err)
+	}
+	src := io.MultiReader(bytes.NewReader(head), r)
+	h := sha256.New()
+	n, err := io.Copy(h, src)
 	if err != nil {
-		t.Fatalf("flac.New: %v (прочитано %d байт)", err, counter.n)
+		t.Fatalf("чтение через MultiReader: %v (прочитано %d)", err, n)
 	}
-	t.Logf("STREAMINFO: rate=%d ch=%d bits=%d samples=%d (прочитано %d байт)",
-		stream.Info.SampleRate, stream.Info.NChannels, stream.Info.BitsPerSample,
-		stream.Info.NSamples, counter.n)
+	got := hex.EncodeToString(h.Sum(nil))
 
-	frames := 0
-	for {
-		_, err := stream.ParseNext()
-		if err != nil {
-			t.Fatalf("кадр %d: %v (прочитано %d байт)",
-				frames, err, counter.n)
-		}
-		frames++
-		if frames%200 == 0 {
-			t.Logf("кадров: %d, прочитано %d байт (%.1f %%)", frames, counter.n,
-				100*float64(counter.n)/float64(fileSize(sample)))
-		}
-		if frames > 5000 {
-			break
-		}
+	orig, err := os.ReadFile(sample)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Logf("разобрано кадров: %d", frames)
-}
+	oh := sha256.Sum256(orig)
+	want := hex.EncodeToString(oh[:])
 
-// countingReader считает прочитанные байты.
-type countingReader struct {
-	r io.Reader
-	n int64
+	t.Logf("прочитано %d байт, ожидалось %d", n, len(orig))
+	t.Logf("sha256 через MultiReader: %s", got[:16])
+	t.Logf("sha256 исходного файла:  %s", want[:16])
+	if got != want {
+		t.Fatalf("данные через MultiReader отличаются от исходных")
+	}
 }
-
-func (c *countingReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n += int64(n)
-	return n, err
-}
-
-var _ = fmt.Sprintf

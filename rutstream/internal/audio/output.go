@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/hajimehoshi/oto"
 )
 
 // WAVWriter пишет PCM s16le в WAV-файл.
@@ -150,20 +149,4 @@ func FormatName(f Format) string {
 	}
 }
 
-// playToDevice воспроизводит PCM через системное устройство.
-func playToDevice(pcm []byte, f Format) error {
-	if f.SampleRate <= 0 || f.Channels <= 0 {
-		return fmt.Errorf("некорректный формат потока")
-	}
-	ctx, err := oto.NewContext(f.SampleRate, f.Channels, 2, 4096)
-	if err != nil {
-		return err
-	}
-	defer ctx.Close()
-	player := ctx.NewPlayer()
-	defer player.Close()
-	if _, err := player.Write(pcm); err != nil {
-		return err
-	}
-	return nil
-}
+

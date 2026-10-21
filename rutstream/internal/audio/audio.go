@@ -143,6 +143,7 @@ func (d *Decoder) readFLAC(p []byte) (int, error) {
 				return 0, io.EOF
 			}
 			return 0, err
+
 		}
 		// Конвертируем сэмплы фрейма в PCM s16le.
 		nch := len(f.Subframes)

@@ -274,12 +274,76 @@ func (s *Session) ClearWantedPieces() {
 
 // OpenFile открывает поток чтения файла раздачи.
 // Чтение «подтягивает» нужные piece'ы автоматически (readahead).
+//
+// Важно: поток ограничен логической длиной файла. Хранилище anacrolix
+// выравнивает файлы по границе chunk'а (16 КБ), и без этого ограничения
+// читатель получал бы «хвост» из мусора за пределами файла — парсеры
+// аудиоformats спотыкались бы на нём («invalid sync-code» вместо EOF).
 func (s *Session) OpenFile(fileIdx int) (io.ReadSeekCloser, error) {
 	files := s.t.Files()
 	if fileIdx < 0 || fileIdx >= len(files) {
 		return nil, fmt.Errorf("индекс файла %d вне диапазона (%d)", fileIdx, len(files))
 	}
-	return files[fileIdx].NewReader(), nil
+	f := files[fileIdx]
+	r := f.NewReader()
+	return &limitedFileReader{r: r, length: f.Length()}, nil
+}
+
+// limitedFileReader — файл раздачи с ограничением по логической длине.
+type limitedFileReader struct {
+	r      io.ReadSeeker
+	length int64
+	pos    int64
+}
+
+// Read читает не больше оставшегося объёма файла.
+func (l *limitedFileReader) Read(p []byte) (int, error) {
+	if l.pos >= l.length {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > l.length-l.pos {
+		p = p[:l.length-l.pos]
+	}
+	n, err := l.r.Read(p)
+	l.pos += int64(n)
+	if err == nil && l.pos >= l.length {
+		err = io.EOF
+	}
+	return n, err
+}
+
+// Seek перематывает поток (в пределах файла).
+func (l *limitedFileReader) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = l.pos + offset
+	case io.SeekEnd:
+		abs = l.length + offset
+	default:
+		return 0, fmt.Errorf("неверный whence: %d", whence)
+	}
+	if abs < 0 {
+		return 0, fmt.Errorf("отрицательная позиция: %d", abs)
+	}
+	if abs > l.length {
+		abs = l.length
+	}
+	if _, err := l.r.Seek(abs, io.SeekStart); err != nil {
+		return 0, err
+	}
+	l.pos = abs
+	return abs, nil
+}
+
+// Close закрывает поток.
+func (l *limitedFileReader) Close() error {
+	if c, ok := l.r.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
 }
 
 // WaitPiece дожидается готовности piece'а.
