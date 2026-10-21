@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/mixa7/rutstream/internal/audio"
 	"github.com/mixa7/rutstream/internal/catalog"
+	"github.com/mixa7/rutstream/internal/download"
 	"github.com/mixa7/rutstream/internal/mediaindex"
 	"github.com/mixa7/rutstream/internal/playback"
 	"github.com/mixa7/rutstream/internal/rutracker"
@@ -445,11 +447,14 @@ func cmdPlay(ctx context.Context, args []string) error {
 }
 
 func cmdDownload(ctx context.Context, args []string) error {
-	if len(args) < 2 {
-		return fmt.Errorf("нужны topicID и номер трека")
+	if len(args) < 1 {
+		return fmt.Errorf("нужны topicID и номер трека (или album/discography)")
 	}
 	id, _ := strconv.ParseInt(args[0], 10, 64)
-	trackNo, _ := strconv.Atoi(args[1])
+	what := "1"
+	if len(args) > 1 {
+		what = args[1]
+	}
 	a, err := newApp()
 	if err != nil {
 		return err
@@ -464,32 +469,100 @@ func cmdDownload(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if trackNo < 1 || trackNo > len(ix.Tracks) {
-		return fmt.Errorf("трек №%d вне диапазона (1..%d)", trackNo, len(ix.Tracks))
+	if len(ix.Tracks) == 0 {
+		return fmt.Errorf("в раздаче не найдено ни одного трека")
 	}
-	track := ix.Tracks[trackNo-1]
-	session, err := a.engine.Start(ctx, mi, torrent.StartOptions{Trackers: trackersOf(mi)})
-	if err != nil {
-		return err
+
+	var fileIdxs []int
+	label := ""
+	switch what {
+	case "album":
+		album := ""
+		if len(ix.Tracks) > 0 {
+			album = ix.Tracks[0].Album
+		}
+		fileIdxs = download.AlbumFiles(info, album, allFileIndexes(info))
+		label = "альбом " + album
+	case "discography", "all":
+		fileIdxs = allFileIndexes(info)
+		label = "дискография"
+	default:
+		n, err := strconv.Atoi(what)
+		if err != nil {
+			return fmt.Errorf("трек номером не указан: %q", what)
+		}
+		if n < 1 || n > len(ix.Tracks) {
+			return fmt.Errorf("трек №%d вне диапазона (1..%d)", n, len(ix.Tracks))
+		}
+		track := ix.Tracks[n-1]
+		fileIdxs = []int{track.FileIdx}
+		label = fmt.Sprintf("трек №%d (%s)", n, track.Title)
 	}
-	defer session.Close()
-	if err := session.SetWantedFiles([]int{track.FileIdx}); err != nil {
-		return err
+
+	// Оценка объёма до старта.
+	var total int64
+	for _, i := range fileIdxs {
+		if p, err := mediaindex.PlanForFile(info, i); err == nil {
+			total += p.ByteEnd - p.ByteStart
+		}
 	}
-	fmt.Printf("Скачиваю %s…\n", track.Path)
-	deadline := time.Now().Add(30 * time.Minute)
-	for time.Now().Before(deadline) {
-		st := session.Stats()
-		fmt.Printf("\r  %s / %s (piece'ов %d/%d)   ", human(st.BytesDownloaded),
-			human(track.ByteEnd-track.ByteStart), st.PiecesComplete, st.PiecesTotal)
-		if st.BytesDownloaded >= track.ByteEnd-track.ByteStart {
+	fmt.Printf("Задание: %s\n", label)
+	fmt.Printf("Файлов: %d, объём: %s (раздача целиком: %s)\n",
+		len(fileIdxs), human(total), human(info.TotalLength()))
+
+
+	fetcher := &download.TorrentFetcher{
+		Engine: a.engine,
+		MetaInfo: func(ctx context.Context, task *download.Task) (*metainfo.MetaInfo, error) {
+			return mi, nil
+		},
+	}
+	mgr := download.NewManager(fetcher, slog.Default())
+	hash, _ := torrent.InfoHashOf(mi)
+	mgr.Add(download.Task{
+		Kind:     download.KindTrack,
+		TopicID:  id,
+		Title:    label,
+		InfoHash: hash,
+		FileIdxs: fileIdxs,
+		Priority: 10,
+	})
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		_ = mgr.Run(runCtx)
+	}()
+	for {
+		tasks := mgr.Tasks()
+		if len(tasks) == 0 {
 			break
 		}
-		time.Sleep(time.Second)
+		t := tasks[0]
+		switch t.State {
+		case download.StateDone:
+			fmt.Printf("\nГотово: %s\n", human(t.BytesDone))
+			return nil
+		case download.StateFailed:
+			return fmt.Errorf("задание не выполнено: %s", t.Error)
+		}
+		fmt.Printf("\r  %s / %s (%.1f%%)   ", human(t.BytesDone), human(t.BytesTotal), t.Progress())
+		time.Sleep(500 * time.Millisecond)
 	}
-	fmt.Println()
 	return nil
 }
+
+// allFileIndexes возвращает индексы всех файлов раздачи.
+func allFileIndexes(info *metainfo.Info) []int {
+	files := mediaindex.FilesInfo(info)
+	out := make([]int, 0, len(files))
+	for i := range files {
+		out = append(out, i)
+	}
+	return out
+}
+
+
 
 func cmdHistory(ctx context.Context) error {
 	a, err := newApp()

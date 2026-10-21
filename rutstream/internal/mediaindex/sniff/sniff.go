@@ -22,6 +22,8 @@ type Track struct {
 	Codec string
 	// Method — метод сжатия (для ZIP: 0 — без сжатия, 8 — deflate).
 	Method uint16
+	// Solid — трек зависит от данных предыдущих файлов (solid-архив).
+	Solid bool
 }
 
 // Result — результат разбора контейнера.
@@ -60,6 +62,8 @@ func Probe(r io.ReaderAt, size int64) (*Result, error) {
 		return probeMP3(r, size)
 	case len(head) >= 4 && string(head[0:4]) == "PK\x03\x04":
 		return probeZipResult(r, size)
+	case len(head) >= 7 && string(head[0:7]) == string(rar4Marker):
+		return probeRarResult(r, size)
 	}
 	return nil, ErrUnsupported
 }
@@ -569,4 +573,31 @@ func utf16Decode(u []uint16) []rune {
 		out = append(out, rune(c))
 	}
 	return out
+}
+
+// probeRarResult превращает записи RAR-архива в карту треков.
+func probeRarResult(r io.ReaderAt, size int64) (*Result, error) {
+	entries, err := ProbeRar(r, size)
+	if err != nil {
+		return nil, err
+	}
+	res := &Result{Format: "rar", Codec: "rar", Tags: map[string]string{}}
+	for _, e := range entries {
+		if !looksLikeAudio(e.Name) {
+			continue
+		}
+		res.Tracks = append(res.Tracks, Track{
+			Index:       len(res.Tracks) + 1,
+			Title:       titleFromName(e.Name),
+			Offset:      e.DataOffset,
+			DurationSec: estimateDuration(e.UnpackedSize),
+			Size:        e.UnpackedSize,
+			Codec:       codecOfName(e.Name),
+			Solid:       e.Solid,
+		})
+	}
+	if len(res.Tracks) == 0 {
+		return res, fmt.Errorf("%w: в архиве нет аудиофайлов", ErrUnsupported)
+	}
+	return res, nil
 }
