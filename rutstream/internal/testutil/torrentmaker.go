@@ -27,6 +27,12 @@ type GeneratedFile struct {
 // MakeTorrent создаёт metainfo для мультифайловой раздачи и (опционально)
 // записывает сами файлы на диск в каталог destDir (в раскладке <destDir>/<Name>/<path>).
 func MakeTorrent(name string, files []GeneratedFile, pieceLen int64, destDir string) (*metainfo.MetaInfo, error) {
+	return MakeTorrentWithContent(name, files, pieceLen, destDir, nil)
+}
+
+// MakeTorrentWithContent — как MakeTorrent, но позволяет подставить реальное
+// содержимое для отдельных файлов: content[путь внутри раздачи] = путь к источнику.
+func MakeTorrentWithContent(name string, files []GeneratedFile, pieceLen int64, destDir string, content map[string]string) (*metainfo.MetaInfo, error) {
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 
 	info := &metainfo.Info{
@@ -48,6 +54,12 @@ func MakeTorrent(name string, files []GeneratedFile, pieceLen int64, destDir str
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return nil, err
 		}
+		if src, ok := content[f.Path]; ok {
+			if err := copyFile(src, p); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if err := writeFile(p, f); err != nil {
 			return nil, err
 		}
@@ -68,8 +80,23 @@ func MakeTorrent(name string, files []GeneratedFile, pieceLen int64, destDir str
 	return mi, nil
 }
 
-func writeFile(path string, f GeneratedFile) error {
-	out, err := os.Create(path)
+// copyFile копирует файл-источник в путь назначения.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func writeFile(path string, f GeneratedFile) error {	out, err := os.Create(path)
 	if err != nil {
 		return err
 	}
