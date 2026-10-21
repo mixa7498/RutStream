@@ -133,6 +133,22 @@ func PlanForTrack(info *metainfo.Info, track Track) (mediaindex.Plan, error) {
 	return mediaindex.PlanForFile(info, track.FileIdx)
 }
 
+// ReleaseTrack освобождает память, занятую piece'ами трека (режим RAM).
+func (p *Player) ReleaseTrack(track Track, info *metainfo.Info) {
+	if p == nil || p.session == nil || info == nil {
+		return
+	}
+	plan, err := mediaindex.PlanForFile(info, track.FileIdx)
+	if err != nil {
+		return
+	}
+	idx := make([]int, 0, plan.PieceEnd-plan.PieceStart)
+	for i := plan.PieceStart; i < plan.PieceEnd; i++ {
+		idx = append(idx, i)
+	}
+	p.session.ReleasePieces(idx)
+}
+
 // playFromArchive воспроизводит трек, лежащий внутри ZIP-архива раздачи.
 //
 // Скачивается только кусок архива с нужной записью; запись распаковывается

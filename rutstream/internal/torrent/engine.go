@@ -56,6 +56,13 @@ type Options struct {
 	UploadLimit int64
 	// Logger.
 	Logger *slog.Logger
+	// StorageMode — "disk" (по умолчанию) или "ram".
+	//
+	// "ram" — piece'ы хранятся в памяти: при потоковом воспроизведении на SSD
+	// не пишется ни байта. Ограничено MemLimit.
+	StorageMode string
+	// MemLimit — лимит памяти для режима "ram" (байт; 0 — без лимита).
+	MemLimit int64
 }
 
 // Engine — BitTorrent-клиент.
@@ -63,6 +70,8 @@ type Engine struct {
 	client *bt.Client
 	opts   Options
 	log    *slog.Logger
+	// mem — хранилище в памяти (если StorageMode == "ram").
+	mem *MemoryStorage
 }
 
 // New создаёт движок.
@@ -117,26 +126,36 @@ func New(opts Options) (*Engine, error) {
 		}
 	}
 
+	// Хранилище.
+	var mem *MemoryStorage
+	switch opts.StorageMode {
+	case "ram", "RAM", "memory":
+		// Данные только в памяти: 0 байт на SSD при стриминге.
+		mem = NewMemoryStorage(opts.MemLimit)
+		cfg.DefaultStorage = mem
+	default:
+		// Пишем сразу в финальные файлы, без промежуточных «.part».
+		//
+		// Почему: при потоковом чтении мы держим файл открытым, а Windows не
+		// позволяет переименовать открытый файл — anacrolix не смог бы перевести
+		// «X.flac.part» в «X.flac» и получал «Access is denied».
+		if opts.DataDir != "" {
+			fs := storage.NewFileOpts(storage.NewFileClientOpts{
+				ClientBaseDir: opts.DataDir,
+				UsePartFiles:  g.Option[bool]{Value: false, Ok: true},
+			})
+			cfg.DefaultStorage = fs
+		}
+	}
+
 	cl, err := bt.NewClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("создание BT-клиента: %w", err)
 	}
-	// Хранилище: пишем сразу в финальные файлы, без промежуточных «.part».
-	//
-	// Почему: при потоковом чтении мы держим файл открытым, а Windows не
-	// позволяет переименовать открытый файл — anacrolix не смог бы перевести
-	// «X.flac.part» в «X.flac» и получал «Access is denied».
-	if opts.DataDir != "" {
-		fs := storage.NewFileOpts(storage.NewFileClientOpts{
-			ClientBaseDir: opts.DataDir,
-			UsePartFiles:  g.Option[bool]{Value: false, Ok: true},
-		})
-		cfg.DefaultStorage = fs
-	}
 	if proxyDialer != nil {
 		cl.AddDialer(proxyDialer)
 	}
-	return &Engine{client: cl, opts: opts, log: opts.Logger}, nil
+	return &Engine{client: cl, opts: opts, log: opts.Logger, mem: mem}, nil
 }
 
 // Close останавливает движок.
@@ -415,6 +434,24 @@ func (s *Session) AddClientPeer(cl *bt.Client) int {
 func (s *Session) Close() error {
 	s.t.Drop()
 	return nil
+}
+
+// ReleasePieces освобождает память (в режиме RAM) под указанные piece'ы.
+//
+// Вызывается после проигрывания трека, чтобы не держать в RAM всю раздачу.
+func (s *Session) ReleasePieces(indices []int) {
+	if s.eng == nil || s.eng.mem == nil || len(indices) == 0 {
+		return
+	}
+	s.eng.mem.Release(s.t.InfoHash(), indices)
+}
+
+// MemoryUsed возвращает объём данных, удерживаемых в памяти (режим RAM).
+func (e *Engine) MemoryUsed() int64 {
+	if e.mem == nil {
+		return 0
+	}
+	return e.mem.Used()
 }
 
 // InfoHashOf вычисляет info_hash раздачи.

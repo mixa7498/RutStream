@@ -129,6 +129,17 @@ func newApp() (*app, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Режим хранения: disk (по умолчанию) или ram (0 байт на SSD при стриминге).
+	storageMode := strings.ToLower(os.Getenv("RUTSTREAM_STORAGE"))
+	if storageMode == "" {
+		storageMode = "disk"
+	}
+	var memLimit int64 = 512 << 20
+	if v := os.Getenv("RUTSTREAM_MEM_LIMIT_MB"); v != "" {
+		if mb, err := strconv.ParseInt(v, 10, 64); err == nil {
+			memLimit = mb << 20
+		}
+	}
 	engine, err := torrent.New(torrent.Options{
 		DataDir:       filepath.Join(dataDir, "data"),
 		ProxyURL:      os.Getenv("RUTSTREAM_PROXY"),
@@ -136,6 +147,8 @@ func newApp() (*app, error) {
 		DisablePEX:    true,
 		DisableWebseeds: true,
 		Seed:          true,
+		StorageMode:   storageMode,
+		MemLimit:      memLimit,
 	})
 	if err != nil {
 		store.Close()
@@ -607,6 +620,9 @@ func cmdPlay(ctx context.Context, args []string) error {
 		res.Samples, res.DurationSec, formatName(res.Format))
 	fmt.Printf("Скачано по сети: %s | время до конца: %s\n", human(res.BytesDownloaded), res.Elapsed.Round(time.Millisecond))
 	fmt.Printf("WAV: %s\n", wav)
+	// В режиме RAM освобождаем память под скачанные piece'ы.
+	player.ReleaseTrack(playback.Track{FileIdx: track.FileIdx}, info)
+	fmt.Printf("память под piece'ы: %s\n", human(a.engine.MemoryUsed()))
 	return nil
 }
 
