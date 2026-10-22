@@ -28,6 +28,9 @@ type Topic struct {
 	Bitrate  string `json:"bitrate"`
 	Duration string `json:"duration"`
 	Quality  string `json:"quality"`
+	// ForumIDs — разделы, в которых находится тема (из хлебных крошек
+	// страницы). Нужны для рекомендаций «похожие исполнители».
+	ForumIDs []int `json:"forumIds"`
 
 	// Треклист и список файлов (заполняются при разборе темы).
 	Tracks []SiteTrack `json:"tracks"`

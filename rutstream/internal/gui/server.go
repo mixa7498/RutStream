@@ -56,6 +56,24 @@ type Server struct {
 	fetcher  *download.TorrentFetcher
 	listener net.Listener
 	srv      *http.Server
+	// topicID — раздача, с которой работаем сейчас (для рейтинга).
+	topicID int64
+	// ratioMin — минимально допустимый рейтинг раздачи (0 — не проверять).
+	ratioMin float64
+	// historyTopic — раздача, для которой уже сохранены треки в каталоге.
+	historyTopic int64
+}
+
+// RatioInfo — состояние рейтинга по текущей раздаче.
+type RatioInfo struct {
+	TopicID    int64   `json:"topicId"`
+	Downloaded int64   `json:"downloaded"`
+	Uploaded   int64   `json:"uploaded"`
+	Value      float64 `json:"value"`
+	Min        float64 `json:"min"`
+	Warn       bool    `json:"warn"`
+	// Need — сколько ещё нужно отдать, чтобы догнать минимальный рейтинг.
+	Need int64 `json:"need"`
 }
 
 // PlayStatus — состояние воспроизведения.
@@ -78,10 +96,17 @@ func New(opts Options) *Server {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	ratioMin := 0.5
+	if v := os.Getenv("RUTSTREAM_MIN_RATIO"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			ratioMin = f
+		}
+	}
 	return &Server{
-		opts: opts,
-		log:  opts.Logger,
-		play: PlayStatus{State: "idle"},
+		opts:     opts,
+		log:      opts.Logger,
+		play:     PlayStatus{State: "idle"},
+		ratioMin: ratioMin,
 	}
 }
 
@@ -131,6 +156,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiTopic(w, r)
 	case "artist":
 		s.apiArtist(w, r)
+	case "similar":
+		s.apiSimilar(w, r)
+	case "history":
+		s.apiHistory(w, r)
 	case "plan":
 		s.apiPlan(w, r)
 	case "play":
@@ -156,17 +185,144 @@ func writeErr(w http.ResponseWriter, err error) {
 func (s *Server) apiState(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	play := s.play
+	session := s.session
+	topicID := s.topicID
+	ratioMin := s.ratioMin
 	s.mu.Unlock()
 	downloads := []download.Task{}
 	if s.mgr != nil {
 		downloads = s.mgr.Tasks()
 	}
+	ratio := RatioInfo{TopicID: topicID, Min: ratioMin}
+	if session != nil {
+		st := session.Stats()
+		ratio.Downloaded = st.BytesDownloaded
+		ratio.Uploaded = st.BytesUploaded
+		if st.BytesDownloaded > 0 {
+			ratio.Value = float64(st.BytesUploaded) / float64(st.BytesDownloaded)
+		}
+		if ratioMin > 0 && st.BytesDownloaded > 0 {
+			ratio.Warn = ratio.Value < ratioMin
+			need := int64(float64(st.BytesDownloaded) * ratioMin)
+			if need > st.BytesUploaded {
+				ratio.Need = need - st.BytesUploaded
+			}
+		}
+	}
 	writeJSON(w, map[string]any{
-		"loggedIn": s.opts.Client != nil && s.opts.Client.SessionCookie() != "",
-		"playing":  play,
+		"loggedIn":  s.opts.Client != nil && s.opts.Client.SessionCookie() != "",
+		"playing":   play,
 		"downloads": downloads,
 		"hasDevice": audio.DeviceAvailable(),
+		"ratio":     ratio,
 	})
+}
+
+// saveTracks сохраняет треки раздачи в каталоге — чтобы работал «недавно
+// слушанное» (история ссылается на треки по id).
+func (s *Server) saveTracks(ctx context.Context, topicID int64, ix *mediaindex.Index, artist, album string) {
+	if s.opts.Store == nil || ix == nil {
+		return
+	}
+	tracks := make([]catalog.Track, 0, len(ix.Tracks))
+	for i, t := range ix.Tracks {
+		a, al := t.Artist, t.Album
+		if a == "" {
+			a = artist
+		}
+		if al == "" {
+			al = album
+		}
+		tracks = append(tracks, catalog.Track{
+			ID:       trackID(topicID, i+1),
+			TopicID:  topicID,
+			Artist:   a,
+			Album:    al,
+			Title:    t.Title,
+			Disc:     t.Disc,
+			Pos:      t.Pos,
+			Duration: t.DurationSec,
+			Format:   t.Codec,
+			Lossless: t.Lossless,
+		})
+	}
+	if err := s.opts.Store.SaveTracks(ctx, topicID, tracks); err != nil {
+		s.log.Debug("не удалось сохранить треки в каталоге", "err", err)
+	}
+}
+
+// trackID — идентификатор трека в каталоге: «<topicID>:<номер>».
+func trackID(topicID int64, no int) string {
+	return fmt.Sprintf("%d:%d", topicID, no)
+}
+
+// apiSimilar — похожие исполнители (рекомендации).
+//
+// Можно указать topic (тогда раздел подбирается автоматически по крошкам
+// темы) или forum (тогда листинг раздела берётся напрямую).
+func (s *Server) apiSimilar(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Client == nil {
+		writeErr(w, fmt.Errorf("нет подключения к сайту"))
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 12
+	}
+	ctx := r.Context()
+	if topicID, _ := strconv.ParseInt(r.URL.Query().Get("topic"), 10, 64); topicID > 0 {
+		topic, err := s.opts.Client.Topic(ctx, topicID)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		// Раздачи лежат в ПОДРАЗДЕЛЕ: в крошках родительский раздел идёт
+		// первым, раздачи — вторым. Перебираем кандидатов и берём тот, где
+		// раздач больше всего.
+		var best []rutracker.ArtistStat
+		for i, id := range topic.ForumIDs {
+			if i >= 4 {
+				break
+			}
+			artists, err := s.opts.Client.SimilarArtists(ctx, id, limit)
+			if err != nil {
+				continue
+			}
+			if len(artists) > len(best) {
+				best = artists
+			}
+		}
+		if best == nil {
+			best = []rutracker.ArtistStat{}
+		}
+		writeJSON(w, best)
+		return
+	}
+	forumID, _ := strconv.Atoi(r.URL.Query().Get("forum"))
+	artists, err := s.opts.Client.SimilarArtists(ctx, forumID, limit)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, artists)
+}
+
+// apiHistory — недавно слушанные треки.
+func (s *Server) apiHistory(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Store == nil {
+		writeJSON(w, []catalog.HistoryEntry{})
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 10
+	}
+	entries, err := s.opts.Store.History(r.Context(), limit)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, entries)
 }
 
 // apiSections — дерево музыкальных разделов.
@@ -215,7 +371,46 @@ func (s *Server) apiTopic(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, topic)
+	// Отдаём тему как есть, но с разделом (для рекомендаций).
+	data, err := json.Marshal(topic)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(data, &resp); err != nil {
+		writeErr(w, err)
+		return
+	}
+	resp["forumId"] = s.pickForumID(r.Context(), topic)
+	writeJSON(w, resp)
+}
+
+// pickForumID выбирает музыкальный раздел темы (из хлебных крошек).
+func (s *Server) pickForumID(ctx context.Context, topic *rutracker.Topic) int {
+	if topic == nil || len(topic.ForumIDs) == 0 {
+		return 0
+	}
+	forums, err := s.opts.Client.Forums(ctx)
+	if err != nil {
+		return topic.ForumIDs[0]
+	}
+	music := map[int]bool{}
+	for _, f := range rutracker.MusicForums(forums) {
+		music[int(f.ID)] = true
+	}
+	// Раздачи лежат в ПОДРАЗДЕЛЕ: в крошках родительский раздел идёт первым,
+	// а раздачи — вторым («Зарубежный Rock» → «Classic Rock & Hard Rock
+	// (lossless)»).
+	if len(topic.ForumIDs) >= 2 && music[topic.ForumIDs[1]] {
+		return topic.ForumIDs[1]
+	}
+	for _, id := range topic.ForumIDs {
+		if music[id] {
+			return id
+		}
+	}
+	return topic.ForumIDs[0]
 }
 
 // apiArtist — все раздачи исполнителя, сгруппированные по альбомам.
@@ -281,16 +476,36 @@ func (s *Server) apiPlan(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	session, err := s.openSession(ctx, mi)
+	session, err := s.openSession(ctx, mi, id)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx)
+	// Треклист с сайта — внешний индекс: он даёт названия и длительности.
+	var siteTracks []mediaindex.SiteTrack
+	var topicArtist, topicAlbum string
+	if s.opts.Client != nil {
+		if topic, err := s.opts.Client.Topic(ctx, id); err == nil {
+			topicArtist, topicAlbum = topic.Artist, topic.Album
+			for _, st := range topic.Tracks {
+				siteTracks = append(siteTracks, mediaindex.SiteTrack{
+					Title:       st.Title,
+					Artist:      topic.Artist,
+					Album:       topic.Album,
+					DurationSec: st.Duration,
+					Pos:         st.Pos,
+					Disc:        st.Disc,
+				})
+			}
+		}
+	}
+	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx,
+		mediaindex.Hints{SiteTracks: siteTracks, Artist: topicArtist, Album: topicAlbum})
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
+	s.saveTracks(ctx, id, ix, topicArtist, topicAlbum)
 	type Track struct {
 		No        int     `json:"no"`
 		Title     string  `json:"title"`
@@ -380,11 +595,11 @@ func (s *Server) startPlayback(ctx context.Context, topicID int64, trackNo int) 
 	if err != nil {
 		return err
 	}
-	session, err := s.openSession(ctx, mi)
+	session, err := s.openSession(ctx, mi, topicID)
 	if err != nil {
 		return err
 	}
-	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx)
+	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx, mediaindex.Hints{})
 	if err != nil {
 		return err
 	}
@@ -428,6 +643,13 @@ func (s *Server) startPlayback(ctx context.Context, topicID int64, trackNo int) 
 		}
 		cancel()
 		s.mu.Unlock()
+		// Записываем в историю: что слушали и сколько.
+		if s.opts.Store != nil && err == nil {
+			played := int64(s.play.Elapsed * 1000)
+			if played > 0 {
+				_ = s.opts.Store.AddHistory(context.Background(), trackID(topicID, trackNo), played)
+			}
+		}
 	}()
 	return nil
 }
@@ -525,11 +747,11 @@ func (s *Server) enqueueDownload(ctx context.Context, topicID int64, what string
 	if err != nil {
 		return err
 	}
-	session, err := s.openSession(ctx, mi)
+	session, err := s.openSession(ctx, mi, topicID)
 	if err != nil {
 		return err
 	}
-	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx)
+	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx, mediaindex.Hints{})
 	if err != nil {
 		return err
 	}
@@ -622,19 +844,26 @@ func (s *Server) fetchTorrent(ctx context.Context, topicID int64) (*metainfo.Met
 }
 
 // openSession открывает (или переиспользует) сессию для раздачи.
-func (s *Server) openSession(ctx context.Context, mi *metainfo.MetaInfo) (*torrent.Session, error) {
+func (s *Server) openSession(ctx context.Context, mi *metainfo.MetaInfo, topicID int64) (*torrent.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.session != nil {
-		return s.session, nil
+		if s.topicID != topicID {
+			// Другая раздача — прежняя сессия больше не актуальна.
+			s.session.Close()
+			s.session = nil
+		}
 	}
-	session, err := s.opts.Engine.Start(ctx, mi, torrent.StartOptions{Trackers: trackersOf(mi)})
-	if err != nil {
-		return nil, err
+	if s.session == nil {
+		session, err := s.opts.Engine.Start(ctx, mi, torrent.StartOptions{Trackers: trackersOf(mi)})
+		if err != nil {
+			return nil, err
+		}
+		s.session = session
+		s.player = playback.New(session)
+		s.topicID = topicID
 	}
-	s.session = session
-	s.player = playback.New(session)
-	return session, nil
+	return s.session, nil
 }
 
 // trackersOf возвращает список трекеров из .torrent.

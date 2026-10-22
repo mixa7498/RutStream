@@ -177,12 +177,28 @@ func newAppWithStorage(storage string) (*app, error) {
 // attachBrowser подключает браузерный транспорт, если пользователь запустил
 // Edge/Chrome с --remote-debugging-port. Это снимает Cloudflare-challenge:
 // запросы идут из настоящего браузера с вашим профилем и cookie.
+//
+// Если браузер с отладкой не запущен, приложение запускает его само
+// (с отдельным профилем в каталоге данных): один раз пройдите проверку
+// Cloudflare в открывшемся окне — и дальше cookie живут в профиле приложения.
 func (a *app) attachBrowser() {
 	port := rutracker.DefaultCDPPort
 	if v := os.Getenv("RUTSTREAM_CDP_PORT"); v != "" {
 		port = rutracker.PortFromArg(v)
 	}
 	if !rutracker.CDPAvailable(port) {
+		profile := filepath.Join(a.dataDir, "browser")
+		if err := rutracker.OpenBrowserWithProfile(port, profile); err == nil {
+			for i := 0; i < 40; i++ {
+				if rutracker.CDPAvailable(port) {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+	}
+	if !rutracker.CDPAvailable(port) {
+		fmt.Fprintln(os.Stderr, "предупреждение: браузер с отладкой недоступен — часть страниц сайта будет недоступна")
 		return
 	}
 	cdp, err := rutracker.ConnectCDP(port)
@@ -579,7 +595,7 @@ func cmdPlan(ctx context.Context, args []string) error {
 		return err
 	}
 	defer session.Close()
-	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx)
+	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx, mediaindex.Hints{})
 	if err != nil {
 		return err
 	}
@@ -642,7 +658,7 @@ func cmdPlay(ctx context.Context, args []string) error {
 	// Индекс строим с доступом к содержимому раздачи: для однофайловых
 	// релизов («FLAC (image+.cue)», «альбом одним .zip») список треков
 	// известен только из самого файла.
-	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx)
+	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx, mediaindex.Hints{})
 	if err != nil {
 		return err
 	}
@@ -742,7 +758,7 @@ func cmdDownload(ctx context.Context, args []string) error {
 	}
 	defer session.Close()
 
-	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx)
+	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx, mediaindex.Hints{})
 	if err != nil {
 		return err
 	}

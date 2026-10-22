@@ -220,6 +220,7 @@ async function openTopic(id) {
       ab.textContent = topic.artist;
       ab.onclick = () => openArtist(topic.artist);
     }
+    loadSimilar(id);
 
     const plan = await api('plan?id=' + id);
     state.tracks = plan.tracks || [];
@@ -290,6 +291,63 @@ async function download(what) {
   }
 }
 
+// ---------------------------------------------------------------- рекомендации
+
+// loadSimilar показывает популярных исполнителей раздела темы.
+async function loadSimilar(topicId) {
+  const box = $('#similar');
+  if (!topicId) {
+    box.innerHTML = '<div class="meta">—</div>';
+    return;
+  }
+  try {
+    const list = await api('similar?topic=' + topicId + '&limit=10');
+    box.innerHTML = '';
+    if (!list || !list.length) {
+      box.innerHTML = '<div class="meta">—</div>';
+      return;
+    }
+    for (const a of list) {
+      const el = document.createElement('div');
+      el.className = 'forum';
+      el.textContent = a.artist + (a.lossless ? ' · lossless' : '') + ' (' + a.count + ')';
+      el.onclick = () => {
+        $('#search-input').value = a.artist;
+        search(a.artist);
+      };
+      box.appendChild(el);
+    }
+  } catch (e) {
+    box.innerHTML = '<div class="meta">—</div>';
+  }
+}
+
+// loadHistory показывает недавно слушанные треки.
+async function loadHistory() {
+  const box = $('#history');
+  try {
+    const list = await api('history?limit=10');
+    box.innerHTML = '';
+    if (!list || !list.length) {
+      box.innerHTML = '<div class="meta">—</div>';
+      return;
+    }
+    for (const h of list) {
+      const el = document.createElement('div');
+      el.className = 'forum';
+      el.textContent = (h.title || h.trackId) + (h.artist ? ' — ' + h.artist : '');
+      el.title = h.trackId;
+      el.onclick = () => {
+        const [id, no] = String(h.trackId).split(':');
+        if (id && no) openTopic(Number(id));
+      };
+      box.appendChild(el);
+    }
+  } catch (e) {
+    box.innerHTML = '<div class="meta">—</div>';
+  }
+}
+
 // ---------------------------------------------------------------- статус
 
 async function poll() {
@@ -335,6 +393,21 @@ async function poll() {
       }
     }
     $('#status').textContent = st.loggedIn ? 'сессия активна' : 'нет авторизации';
+
+    // Рейтинг раздачи (Ratio Guard).
+    const r = st.ratio || {};
+    const rbox = $('#ratio');
+    if (r.downloaded > 0) {
+      rbox.innerHTML =
+        'скачано <b>' + human(r.downloaded) + '</b> · раздано <b>' + human(r.uploaded) + '</b> · ' +
+        'рейтинг <b>' + (r.value || 0).toFixed(2) + '</b>' +
+        (r.min ? ' (минимум ' + r.min.toFixed(2) + ')' : '') +
+        (r.warn ? '<br><span class="err">Рейтинг ниже нормы' +
+          (r.need ? ': нужно отдать ещё ' + human(r.need) : '') +
+          '. Держите раздачу включённой или докачайте её.</span>' : '');
+    } else {
+      rbox.innerHTML = '';
+    }
   } catch (e) {
     $('#status').textContent = 'нет связи с приложением';
   }
@@ -354,7 +427,9 @@ $('#sort').onchange = applyFiltersSort;
 
 loadSections();
 poll();
+loadHistory();
 setInterval(poll, 700);
+setInterval(loadHistory, 15000);
 
 // Разделы могли не загрузиться из-за сбоя связи — пробуем ещё раз.
 setTimeout(() => {

@@ -10,20 +10,26 @@ import (
 // TestProbeZip проверяет разбор ZIP-архива: границы записей и смещения данных.
 func TestProbeZip(t *testing.T) {
 	// Собираем тестовый архив в памяти.
+	//
+	// Порядок имён фиксирован: итерация по map даёт случайный порядок,
+	// а тест проверяет, что смещения записей возрастают.
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	files := map[string]string{
-		"01 - First.flac":  "aaaa",
-		"02 - Second.flac": "bbbbbb",
-		"cover.jpg":        "jpg",
+	files := []struct {
+		name    string
+		content string
+	}{
+		{"01 - First.flac", "aaaa"},
+		{"02 - Second.flac", "bbbbbb"},
+		{"cover.jpg", "jpg"},
 	}
-	for name, content := range files {
+	for _, f := range files {
 		// Метод Store: данные в архиве идут без сжатия — так проще проверить смещения.
-		w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: f.name, Method: zip.Store})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := w.Write([]byte(content)); err != nil {
+		if _, err := w.Write([]byte(f.content)); err != nil {
 			t.Fatal(err)
 		}
 	}

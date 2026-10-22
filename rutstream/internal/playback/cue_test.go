@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mixa7/rutstream/internal/mediaindex"
 	"github.com/mixa7/rutstream/internal/testutil"
 	"github.com/mixa7/rutstream/internal/torrent"
 )
@@ -110,7 +111,7 @@ func TestIndexWithCueFile(t *testing.T) {
 	// Сколько реально скачается при проигрывании третьего трека.
 	before := session.Stats().BytesDownloaded
 	builder := &IndexBuilder{Session: session, Info: &info}
-	ix, err := builder.Build(ctx)
+	ix, err := builder.Build(ctx, mediaindex.Hints{})
 	if err != nil {
 		t.Fatal(err)
 	}

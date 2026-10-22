@@ -25,6 +25,26 @@ var peersRe = regexp.MustCompile(`(?i)личеры\s*[:：]?\s*(\d+)`)
 // topicSizeRe ищет «Размер: 960.81 MB» в тексте темы.
 var topicSizeRe = regexp.MustCompile(`(?i)размер\s*[:：]?\s*([\d.,]+\s*(?:bytes|kb|mb|gb|tb)?)`)
 
+// parseTopicForumIDs собирает id разделов из хлебных крошек страницы темы.
+func parseTopicForumIDs(doc *goquery.Document) []int {
+	var out []int
+	seen := map[int]bool{}
+	doc.Find("a[href*='viewforum.php?f=']").Each(func(_ int, a *goquery.Selection) {
+		href, _ := a.Attr("href")
+		m := forumIDRe.FindStringSubmatch(href)
+		if m == nil {
+			return
+		}
+		id, _ := strconv.Atoi(m[1])
+		if id == 0 || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, id)
+	})
+	return out
+}
+
 // parseTopicSize достаёт размер раздачи.
 //
 // На странице темы есть скрытый счётчик с точным числом байтов
@@ -139,6 +159,9 @@ func ParseTopic(page []byte) (*Topic, error) {
 	// («Размер: 960.81 MB», «Сиды: 12», «Личеры: 3»).
 	t.Size, t.SizeText = parseTopicSize(doc)
 	t.Seeds, t.Peers = parseTopicPeers(doc)
+
+	// Разделы темы — из хлебных крошек (ссылки «viewforum.php?f=NNN»).
+	t.ForumIDs = parseTopicForumIDs(doc)
 
 	// Исполнитель и альбом часто указаны только в заголовке темы
 	// («(Жанр) [ИСТОЧНИК] Исполнитель - Альбом - Год, ФОРМАТ, …»).

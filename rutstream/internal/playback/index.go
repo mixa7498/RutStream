@@ -27,18 +27,22 @@ type IndexBuilder struct {
 
 // Build строит индекс раздачи.
 //
+// hints — внешние подсказки (треклист сайта, исполнитель, альбом). Если
+// hints.ReaderFor или hints.CueReader не заданы, используются собственные
+// (доступ к содержимому раздачи).
+//
 // Если раздача содержит один аудиофайл, чтение его заголовка инициирует
 // докачку нужных piece'ов — специально ничего «скачивать заранее» не нужно.
 //
 // Все открытые потоки закрываются: незакрытый ридер удерживает окно
 // опережающего чтения, и клиент продолжает докачивать лишние куски.
-func (b *IndexBuilder) Build(ctx context.Context) (*mediaindex.Index, error) {
+func (b *IndexBuilder) Build(ctx context.Context, hints mediaindex.Hints) (*mediaindex.Index, error) {
 	if b.Session == nil || b.Info == nil {
 		return nil, fmt.Errorf("index: нет сессии или info")
 	}
 	defer b.closeReaders()
-	hints := mediaindex.Hints{
-		ReaderFor: func(fileIdx int) (mediaindex.ReaderAt, error) {
+	if hints.ReaderFor == nil {
+		hints.ReaderFor = func(fileIdx int) (mediaindex.ReaderAt, error) {
 			r, err := b.Session.OpenFile(fileIdx)
 			if err != nil {
 				return nil, err
@@ -51,10 +55,12 @@ func (b *IndexBuilder) Build(ctx context.Context) (*mediaindex.Index, error) {
 				return nil, fmt.Errorf("index: поток не поддерживает ReadAt")
 			}
 			return ra, nil
-		},
-		CueReader: func() ([]byte, error) {
+		}
+	}
+	if hints.CueReader == nil {
+		hints.CueReader = func() ([]byte, error) {
 			return b.readCueFile(ctx)
-		},
+		}
 	}
 	return mediaindex.Build(b.Info, hints)
 }
