@@ -388,11 +388,13 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	if q == "" {
+	forumID, _ := strconv.Atoi(r.URL.Query().Get("forum"))
+	// Пустой запрос без раздела — это ещё не поиск. С разделом — листинг
+	// раздела: так работает выбор раздела в левой колонке.
+	if q == "" && forumID == 0 {
 		writeJSON(w, []rutracker.Topic{})
 		return
 	}
-	forumID, _ := strconv.Atoi(r.URL.Query().Get("forum"))
 	topics, err := s.opts.Client.Search(r.Context(), q, forumID, 0)
 	if err != nil {
 		writeErr(w, err)

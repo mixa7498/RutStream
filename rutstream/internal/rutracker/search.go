@@ -3,6 +3,7 @@ package rutracker
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,12 +23,7 @@ var sizeTextRe = regexp.MustCompile(`(?i)([\d.,]+)\s*(bytes|kb|mb|gb|tb|b)\b`)
 // (по всему сайту, а раздел указан в каждой строке), а фильтр по разделу
 // применяется у нас. Листинг раздела (без nm) идёт с f.
 func (c *Client) Search(ctx context.Context, query string, forumID int, start int) ([]Topic, error) {
-	var path string
-	if strings.TrimSpace(query) != "" {
-		path = fmt.Sprintf("/forum/tracker.php?nm=%s&start=%d", url_QueryEscape(query), start)
-	} else {
-		path = fmt.Sprintf("/forum/tracker.php?f=%d&start=%d", forumID, start)
-	}
+	path := searchPath(query, forumID, start)
 	page, err := c.Get(ctx, path)
 	if err != nil {
 		return nil, err
@@ -36,17 +32,39 @@ func (c *Client) Search(ctx context.Context, query string, forumID int, start in
 	if err != nil {
 		return nil, err
 	}
-	// Фильтруем по разделу на нашей стороне.
+	// Фильтруем по разделу на нашей стороне. Раздачи лежат в подразделах
+	// («Rock (Hi-Res)»), поэтому одного forumID недостаточно: добавляем
+	// подразделы, иначе поиск в выбранном разделе всегда давал бы ноль.
 	if forumID > 0 && strings.TrimSpace(query) != "" {
+		allowed := map[int]bool{forumID: true}
+		subIDs, err := c.ForumSubIDs(ctx, int64(forumID))
+		if err != nil {
+			// Не смогли получить подразделы — лучше показать результаты,
+			// чем молча спрятать их все.
+			return topics, nil
+		}
+		for _, id := range subIDs {
+			allowed[int(id)] = true
+		}
 		var out []Topic
 		for _, t := range topics {
-			if t.ForumID == forumID {
+			if allowed[t.ForumID] {
 				out = append(out, t)
 			}
 		}
 		return out, nil
 	}
 	return topics, nil
+}
+
+// searchPath строит путь трекера. Запрос кодируется как query-параметр:
+// url.QueryEscape превращает кириллицу в percent-encoded UTF-8. Без этого
+// в URL уходили сырые байты, и rutracker отвечал HTTP 400.
+func searchPath(query string, forumID, start int) string {
+	if strings.TrimSpace(query) != "" {
+		return fmt.Sprintf("/forum/tracker.php?nm=%s&start=%d", url.QueryEscape(query), start)
+	}
+	return fmt.Sprintf("/forum/tracker.php?f=%d&start=%d", forumID, start)
 }
 
 // ParseSearchResults разбирает таблицу результатов трекера.
@@ -217,16 +235,4 @@ func ParseSize(s string) int64 {
 		v *= 1 << 40
 	}
 	return int64(v)
-}
-
-func url_QueryEscape(s string) string {
-	return strings.NewReplacer(
-		" ", "+",
-		"&", "%26",
-		"?", "%3F",
-		"#", "%23",
-		"=", "%3D",
-		"+", "%2B",
-		"%", "%25",
-	).Replace(s)
 }

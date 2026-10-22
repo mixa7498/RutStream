@@ -187,6 +187,7 @@ h2:first-child { margin-top: 2px; }
   color: var(--fg-dim);
 }
 .forum:hover { background: var(--bg-3); color: var(--fg); }
+.forum.active { background: var(--bg-3); color: var(--fg); }
 .forum.child { padding-left: 20px; }
 
 .results-head {

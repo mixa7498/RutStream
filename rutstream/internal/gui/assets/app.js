@@ -3,6 +3,7 @@
 const $ = (sel) => document.querySelector(sel);
 const state = {
   forumId: 0,
+  forumTitle: '',
   topicId: 0,
   tracks: [],
   topic: null,
@@ -42,6 +43,12 @@ async function api(path, opts) {
 
 // ---------------------------------------------------------------- разделы
 
+// markForum подсвечивает выбранный раздел в левой колонке.
+function markForum(el) {
+  document.querySelectorAll('#sections .forum').forEach((x) => x.classList.remove('active'));
+  if (el) el.classList.add('active');
+}
+
 async function loadSections() {
   const box = $('#sections');
   try {
@@ -51,6 +58,18 @@ async function loadSections() {
       box.innerHTML = '<div class="meta">Разделы не найдены</div>';
       return;
     }
+    // «Все разделы» возвращает к общему поиску после выбора раздела.
+    const all = document.createElement('div');
+    all.className = 'forum active';
+    all.textContent = 'Все разделы';
+    all.onclick = () => {
+      state.forumId = 0;
+      state.forumTitle = '';
+      $('#search-input').value = '';
+      markForum(all);
+      search('');
+    };
+    box.appendChild(all);
     // Разделы приходят плоским списком с категорией — группируем по ней.
     const cats = new Map();
     for (const f of forums) {
@@ -69,7 +88,9 @@ async function loadSections() {
         el.textContent = f.title;
         el.onclick = () => {
           state.forumId = f.id;
+          state.forumTitle = f.title;
           $('#search-input').value = '';
+          markForum(el);
           search('');
         };
         box.appendChild(el);
@@ -149,10 +170,35 @@ async function search(q) {
   const box = $('#results');
   const head = $('#results-head');
   q = (q === undefined ? $('#search-input').value : q).trim();
-  head.textContent = q ? 'Поиск: ' + q : (state.forumId ? 'Раздел ' + state.forumId : 'Введите запрос');
+  // Текстовый поиск всегда идёт по всему сайту. Если оставить фильтр по
+  // ранее выбранному разделу, он молча обнуляет выдачу: разделы на rutracker
+  // родительские, а раздачи лежат в подразделах.
+  if (q) {
+    state.forumId = 0;
+    state.forumTitle = '';
+    markForum(document.querySelector('#sections .forum'));
+  }
+  const forum = state.forumId;
+  if (!q && !forum) {
+    state.topics = [];
+    head.textContent = 'Введите запрос или выберите раздел';
+    box.innerHTML = '';
+    return;
+  }
+  head.textContent = q
+    ? 'Поиск: ' + q
+    : 'Раздел: ' + (state.forumTitle || forum);
   box.innerHTML = '<div class="meta">Поиск…</div>';
   try {
-    const topics = await api('search?q=' + encodeURIComponent(q) + '&forum=' + state.forumId);
+    const topics = await api('search?q=' + encodeURIComponent(q) + '&forum=' + forum);
+    // У родительского раздела на rutracker темы лежат в подразделах,
+    // поэтому пустой листинг — не повод показывать «Ничего не найдено».
+    if (!q && forum && (!topics || !topics.length)) {
+      state.topics = [];
+      box.innerHTML = '<div class="meta">В разделе нет тем на первой странице. ' +
+        'Введите запрос — поиск идёт по всему сайту.</div>';
+      return;
+    }
     state.topics = topics || [];
     applyFiltersSort();
   } catch (e) {
