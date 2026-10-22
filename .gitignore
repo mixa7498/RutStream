@@ -1,0 +1,8 @@
+﻿# Собранные бинарники и временные файлы
+rutstream/bin/
+*.exe
+*.test
+*.wav
+*.mp3
+*.flac
+*.torrent
