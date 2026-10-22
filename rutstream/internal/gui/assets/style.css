@@ -127,6 +127,47 @@ h2:first-child { margin-top: 2px; }
   letter-spacing: .8px;
 }
 
+.toolbar { margin-bottom: 8px; }
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.controls select {
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+}
+.controls label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 10px;
+  letter-spacing: .4px;
+  background: #2b3a55;
+  color: #9ec1ff;
+  vertical-align: middle;
+}
+.badge.lossless { background: #1f3d2a; color: #7ee2a8; }
+.badge.hi { background: #40332a; color: #f0b775; }
+
+.release {
+  padding: 8px 9px;
+  border-radius: 7px;
+  background: var(--bg-3);
+}
+.release .t { font-weight: 600; }
+.release .m { color: var(--fg-dim); font-size: 12px; margin-top: 2px; }
+.release .act { margin-top: 6px; display: flex; gap: 6px; }
+
 .track {
   display: flex;
   align-items: center;
@@ -164,6 +205,8 @@ h2:first-child { margin-top: 2px; }
 
 .meta { color: var(--fg-dim); font-size: 12px; }
 .meta b { color: var(--fg); font-weight: 600; }
+.meta .act { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+.meta button { font-size: 12px; padding: 4px 8px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 
 .dl { padding: 7px 9px; border-radius: 7px; background: var(--bg-3); }
 .dl .m { color: var(--fg-dim); font-size: 12px; }

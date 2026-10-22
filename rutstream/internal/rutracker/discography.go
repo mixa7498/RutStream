@@ -11,17 +11,17 @@ import (
 
 // AlbumRelease — агрегированный релиз (альбом) по нескольким раздачам.
 type AlbumRelease struct {
-	Artist  string
-	Album   string
-	Year    int
+	Artist  string `json:"artist"`
+	Album   string `json:"album"`
+	Year    int    `json:"year"`
 	// Topics — раздачи этого релиза, лучшая первой.
-	Topics []Topic
+	Topics []Topic `json:"topics"`
 	// IsCollection — раздача содержит всю дискографию.
-	IsCollection bool
+	IsCollection bool `json:"isCollection"`
 	// Lossless — есть ли lossless-версия.
-	Lossless bool
+	Lossless bool `json:"lossless"`
 	// Best — лучшая раздача (lossless + сиды).
-	Best Topic
+	Best Topic `json:"best"`
 }
 
 // collectionRe — маркеры сборников дискографии.
@@ -56,33 +56,49 @@ func YearOfTitle(title string) int {
 
 // SearchArtist ищет все раздачи исполнителя по музыкальным разделам
 // и группирует их в релизы (альбомы).
+//
+// Поиск идёт одним запросом без параметра «f»: комбинация nm+f на форуме
+// ломается («Не найдено»), а фильтр по разделу применяем у себя — так заодно
+// быстрее, чем обходить разделы по очереди.
 func (c *Client) SearchArtist(ctx context.Context, artist string, forums []Forum, perForum int) ([]AlbumRelease, error) {
 	if len(forums) == 0 {
 		return nil, fmt.Errorf("список разделов пуст")
 	}
 	needle := strings.ToLower(artist)
 
-	// Собираем раздачи по всем разделам (последовательно, чтобы не долбить сайт).
-	var all []Topic
+	allowed := make(map[int]bool, len(forums))
 	for _, f := range forums {
-		topics, err := c.Search(ctx, artist, int(f.ID), 0)
-		if err != nil {
-			// Раздел мог быть недоступен — пропускаем, но не рвём общий поиск.
-			continue
+		allowed[int(f.ID)] = true
+	}
+	// Готовый набор разделов с подразделами (задаётся снаружи) — экономим
+	// обход форума.
+	if ids := c.storedMusicForumIDs(); len(ids) > 0 {
+		for id := range ids {
+			allowed[id] = true
 		}
-		for _, t := range topics {
-			if !strings.Contains(strings.ToLower(t.Title), needle) {
-				continue
-			}
-			t.ForumID = int(f.ID)
-			all = append(all, t)
-			if len(all) >= perForum*len(forums) {
-				break
-			}
+	} else {
+		// Раздачи лежат в подразделах («Rock (Hi-Res)»), а не в самих
+		// разделах — собираем id подразделов (с кэшем в клиенте).
+		for id := range c.MusicForumIDs(ctx, forums) {
+			allowed[id] = true
 		}
 	}
+	topics, err := c.Search(ctx, artist, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	var all []Topic
+	for _, t := range topics {
+		if !allowed[t.ForumID] {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(t.Title), needle) {
+			continue
+		}
+		all = append(all, t)
+	}
 	if len(all) == 0 {
-		return nil, fmt.Errorf("по запросу %q ничего не найдено", artist)
+		return nil, fmt.Errorf("по запросу %q в музыкальных разделах ничего не найдено", artist)
 	}
 	return GroupReleases(artist, all), nil
 }

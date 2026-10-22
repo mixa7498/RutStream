@@ -2,9 +2,11 @@ package rutracker
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -83,5 +85,100 @@ func MusicForums(forums []Forum) []Forum {
 			out = append(out, f)
 		}
 	}
+	return out
+}
+
+// SetMusicForumIDs задаёт готовый набор id музыкальных разделов с подразделами.
+//
+// Позволяет не обходить форум повторно: приложение один раз собирает список и
+// кэширует его (на диске), дальше список просто передаётся клиенту.
+func (c *Client) SetMusicForumIDs(ids map[int]bool) {
+	c.musicMu.Lock()
+	c.musicIDs = ids
+	c.musicMu.Unlock()
+}
+
+// storedMusicForumIDs возвращает заданный набор id (nil — если не задан).
+func (c *Client) storedMusicForumIDs() map[int]bool {
+	c.musicMu.Lock()
+	defer c.musicMu.Unlock()
+	return c.musicIDs
+}
+
+// ForumSubIDs возвращает id подразделов форума.
+//
+// Раздачи лежат не в самих разделах («Rock»), а в их подразделах
+// («Rock (Hi-Res)», «Rock (lossless)»). Результаты кэшируются: обход
+// разделов — это десятки запросов к сайту.
+func (c *Client) ForumSubIDs(ctx context.Context, forumID int64) ([]int64, error) {
+	c.subMu.Lock()
+	if ids, ok := c.subIDs[forumID]; ok {
+		c.subMu.Unlock()
+		return ids, nil
+	}
+	c.subMu.Unlock()
+
+	page, err := c.Get(ctx, fmt.Sprintf("/forum/viewforum.php?f=%d", forumID))
+	if err != nil {
+		return nil, err
+	}
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(page)))
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	seen := map[int64]bool{}
+	doc.Find("a[href*='viewforum.php?f=']").Each(func(_ int, a *goquery.Selection) {
+		href, _ := a.Attr("href")
+		m := forumIDRe.FindStringSubmatch(href)
+		if m == nil {
+			return
+		}
+		id, _ := strconv.ParseInt(m[1], 10, 64)
+		if id == 0 || id == forumID || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	})
+	c.subMu.Lock()
+	if c.subIDs == nil {
+		c.subIDs = map[int64][]int64{}
+	}
+	c.subIDs[forumID] = ids
+	c.subMu.Unlock()
+	return ids, nil
+}
+
+// MusicForumIDs возвращает id всех музыкальных разделов вместе с их
+// подразделами. Результат кэшируется в клиенте.
+func (c *Client) MusicForumIDs(ctx context.Context, forums []Forum) map[int]bool {
+	out := map[int]bool{}
+	music := MusicForums(forums)
+	for _, f := range music {
+		out[int(f.ID)] = true
+	}
+	// Подразделы собираем параллельно: разделов десятки, запрос быстрый.
+	sem := make(chan struct{}, 6)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for _, f := range music {
+		wg.Add(1)
+		go func(id int64) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ids, err := c.ForumSubIDs(ctx, id)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			for _, sid := range ids {
+				out[int(sid)] = true
+			}
+			mu.Unlock()
+		}(f.ID)
+	}
+	wg.Wait()
 	return out
 }

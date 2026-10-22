@@ -129,6 +129,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiSearch(w, r)
 	case "topic":
 		s.apiTopic(w, r)
+	case "artist":
+		s.apiArtist(w, r)
 	case "plan":
 		s.apiPlan(w, r)
 	case "play":
@@ -214,6 +216,60 @@ func (s *Server) apiTopic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, topic)
+}
+
+// apiArtist — все раздачи исполнителя, сгруппированные по альбомам.
+func (s *Server) apiArtist(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Client == nil {
+		writeErr(w, fmt.Errorf("нет подключения к сайту"))
+		return
+	}
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		writeJSON(w, []rutracker.AlbumRelease{})
+		return
+	}
+	ctx := r.Context()
+	forums, err := s.opts.Client.Forums(ctx)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	// Набор музыкальных разделов с подразделами (с кэшем на диске).
+	s.opts.Client.SetMusicForumIDs(s.musicForumIDs(ctx, forums))
+	releases, err := s.opts.Client.SearchArtist(ctx, name, forums, 20)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, releases)
+}
+
+// musicForumIDs — id музыкальных разделов вместе с подразделами.
+//
+// Обход разделов (десятки страниц) кэшируется на диске: первый запуск занимает
+// минуту, последующие — мгновенно.
+func (s *Server) musicForumIDs(ctx context.Context, forums []rutracker.Forum) map[int]bool {
+	path := filepath.Join(s.opts.DataDir, "music-forums.json")
+	if data, err := os.ReadFile(path); err == nil {
+		var ids []int
+		if json.Unmarshal(data, &ids) == nil && len(ids) > 0 {
+			out := make(map[int]bool, len(ids))
+			for _, id := range ids {
+				out[id] = true
+			}
+			return out
+		}
+	}
+	ids := s.opts.Client.MusicForumIDs(ctx, forums)
+	list := make([]int, 0, len(ids))
+	for id := range ids {
+		list = append(list, id)
+	}
+	if data, err := json.Marshal(list); err == nil {
+		_ = os.WriteFile(path, data, 0o644)
+	}
+	return ids
 }
 
 // apiPlan — треки раздачи и оценка объёма скачивания.

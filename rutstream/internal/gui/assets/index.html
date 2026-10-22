@@ -23,7 +23,20 @@
   </section>
 
   <section class="col col-results">
-    <div id="results-head" class="results-head">Введите запрос или выберите раздел</div>
+    <div class="toolbar">
+      <div id="results-head" class="results-head">Введите запрос или выберите раздел</div>
+      <div class="controls">
+        <select id="sort">
+          <option value="relevance">по рейтингу</option>
+          <option value="seeds">по сидам</option>
+          <option value="size">по размеру</option>
+          <option value="date">по дате</option>
+        </select>
+        <label><input type="checkbox" id="f-lossless"> lossless</label>
+        <label><input type="checkbox" id="f-seeded"> с сидами</label>
+        <label><input type="checkbox" id="f-collections"> коллекции</label>
+      </div>
+    </div>
     <div id="results" class="list"></div>
   </section>
 

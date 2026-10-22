@@ -6,6 +6,8 @@ const state = {
   topicId: 0,
   tracks: [],
   topic: null,
+  topics: [],       // сырые результаты поиска (до сортировки/фильтров)
+  artist: '',
 };
 
 function human(n) {
@@ -81,6 +83,66 @@ async function loadSections() {
 
 // ---------------------------------------------------------------- поиск
 
+// qualityBadge определяет бейдж качества по названию раздачи.
+function qualityBadge(title) {
+  const t = (title || '').toLowerCase();
+  if (/\b(flac|alac|ape|wav|dsd)\b/.test(t)) {
+    if (/24\/?(96|192)|24 ?bit|hi-?res|96\/24|192\/24/.test(t)) return { text: '24/96', cls: 'hi' };
+    if (/24\/?48/.test(t)) return { text: '24/48', cls: 'hi' };
+    if (/\b(alac)\b/.test(t)) return { text: 'ALAC', cls: 'lossless' };
+    if (/\b(ape|wav|dsd)\b/.test(t)) return { text: t.match(/\b(ape|wav|dsd)\b/)[1].toUpperCase(), cls: 'lossless' };
+    return { text: 'FLAC', cls: 'lossless' };
+  }
+  if (/\bv0\b/.test(t)) return { text: 'MP3 V0' };
+  if (/320/.test(t)) return { text: 'MP3 320' };
+  if (/128/.test(t)) return { text: 'MP3 128' };
+  if (/\baac\b/.test(t)) return { text: 'AAC' };
+  return null;
+}
+
+// isCollection — сборник дискографии.
+function isCollection(title) {
+  return /дискографи|discograph|collection|полное собрание|studio albums|anthology|box ?set/i.test(title || '');
+}
+
+// applyFiltersSort применяет фильтры и сортировку к списку раздач.
+function applyFiltersSort() {
+  const box = $('#results');
+  let list = state.topics.slice();
+  if ($('#f-lossless').checked) {
+    list = list.filter((t) => /flac|alac|ape|wav|dsd|lossless|hi-?res/i.test(t.title + ' ' + (t.format || '')));
+  }
+  if ($('#f-seeded').checked) {
+    list = list.filter((t) => t.seeds > 0);
+  }
+  if ($('#f-collections').checked) {
+    list = list.filter((t) => isCollection(t.title));
+  }
+  const sort = $('#sort').value;
+  if (sort === 'seeds') list.sort((a, b) => (b.seeds || 0) - (a.seeds || 0));
+  else if (sort === 'size') list.sort((a, b) => (b.size || 0) - (a.size || 0));
+  else if (sort === 'date') list.sort((a, b) => (b.id || 0) - (a.id || 0));
+  else list.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+
+  box.innerHTML = '';
+  if (!list.length) {
+    box.innerHTML = '<div class="meta">Ничего не найдено</div>';
+    return;
+  }
+  for (const t of list) {
+    const el = document.createElement('div');
+    el.className = 'item';
+    const badge = qualityBadge(t.title + ' ' + (t.format || ''));
+    el.innerHTML =
+      '<span class="t">' + esc(t.title) +
+      (badge ? '<span class="badge ' + badge.cls + '">' + badge.text + '</span>' : '') + '</span>' +
+      '<span class="m">' + esc(t.sizeText || human(t.size)) +
+      ' · сидов ' + t.seeds + ' · ' + esc(t.category || '') + '</span>';
+    el.onclick = () => openTopic(t.id);
+    box.appendChild(el);
+  }
+}
+
 async function search(q) {
   const box = $('#results');
   const head = $('#results-head');
@@ -89,19 +151,41 @@ async function search(q) {
   box.innerHTML = '<div class="meta">Поиск…</div>';
   try {
     const topics = await api('search?q=' + encodeURIComponent(q) + '&forum=' + state.forumId);
+    state.topics = topics || [];
+    applyFiltersSort();
+  } catch (e) {
+    box.innerHTML = '<div class="err">' + esc(e.message) + '</div>';
+  }
+}
+
+// ---------------------------------------------------------------- исполнитель
+
+async function openArtist(name) {
+  const box = $('#results');
+  const head = $('#results-head');
+  state.artist = name;
+  head.textContent = 'Исполнитель: ' + name;
+  box.innerHTML = '<div class="meta">Поиск раздач исполнителя…</div>';
+  try {
+    const releases = await api('artist?name=' + encodeURIComponent(name));
     box.innerHTML = '';
-    if (!topics.length) {
-      box.innerHTML = '<div class="meta">Ничего не найдено</div>';
+    if (!releases.length) {
+      box.innerHTML = '<div class="meta">Раздач не найдено</div>';
       return;
     }
-    for (const t of topics) {
+    for (const r of releases) {
       const el = document.createElement('div');
-      el.className = 'item';
+      el.className = 'release';
+      const topics = (r.topics || []).slice(0, 4);
       el.innerHTML =
-        '<span class="t">' + esc(t.title) + '</span>' +
-        '<span class="m">' + esc(t.sizeText || human(t.size)) +
-        ' · сидов ' + t.seeds + ' · ' + esc(t.category || '') + '</span>';
-      el.onclick = () => openTopic(t.id);
+        '<div class="t">' + esc(r.album || r.artist) + (r.year ? ' · ' + r.year : '') + '</div>' +
+        '<div class="m">' + topics.length + ' раздач' +
+        (r.lossless ? ' · lossless' : '') + (r.isCollection ? ' · коллекция' : '') + '</div>' +
+        '<div class="act">' + topics.map((t, i) =>
+          '<button data-i="' + i + '">' + esc(t.title.slice(0, 26)) + '…</button>').join('') + '</div>';
+      el.querySelectorAll('button').forEach((b) => {
+        b.onclick = () => openTopic(topics[Number(b.dataset.i)].id);
+      });
       box.appendChild(el);
     }
   } catch (e) {
@@ -125,7 +209,17 @@ async function openTopic(id) {
     $('#release').innerHTML =
       '<b>' + esc(topic.title) + '</b><br>' +
       esc(topic.sizeText || human(topic.size)) + ' · сидов ' + topic.seeds +
-      (topic.category ? '<br>' + esc(topic.category) : '');
+      (topic.category ? '<br>' + esc(topic.category) : '') +
+      '<div class="act">' +
+      '<button id="dl-album">Скачать альбом</button>' +
+      (topic.artist ? '<button id="artist-open">Исполнитель</button>' : '') +
+      '</div>';
+    $('#dl-album').onclick = () => download('album');
+    const ab = $('#artist-open');
+    if (ab) {
+      ab.textContent = topic.artist;
+      ab.onclick = () => openArtist(topic.artist);
+    }
 
     const plan = await api('plan?id=' + id);
     state.tracks = plan.tracks || [];
@@ -253,6 +347,10 @@ $('#search-form').onsubmit = (e) => {
   search();
 };
 $('#stop').onclick = stop;
+$('#sort').onchange = applyFiltersSort;
+['#f-lossless', '#f-seeded', '#f-collections'].forEach((sel) => {
+  $(sel).onchange = applyFiltersSort;
+});
 
 loadSections();
 poll();

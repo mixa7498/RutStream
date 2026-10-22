@@ -59,6 +59,15 @@ type Client struct {
 
 	mu       sync.Mutex
 	transport Transport
+
+	// subMu/subIDs — кэш подразделов форумов (id подразделов по id раздела).
+	subMu   sync.Mutex
+	subIDs  map[int64][]int64
+
+	// musicMu/musicIDs — готовый набор id музыкальных разделов с подразделами
+	// (задаётся снаружи, чтобы не обходить форум повторно).
+	musicMu  sync.Mutex
+	musicIDs map[int]bool
 }
 
 // New создаёт клиента.
