@@ -4,8 +4,11 @@ release/
 *.exe
 *.exe.sha256
 *.cer
+*.pfx
+*.signed
 *.test
 *.wav
 *.mp3
 *.flac
 *.torrent
+session.cookie

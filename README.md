@@ -34,73 +34,81 @@
 
 ## Требования
 
-* Windows 10/11 (x64). Сборка под Linux тоже возможна, но окно сделано под WebView2.
-* Go 1.22+ — для сборки.
-* Установленный Edge или Chrome (приложение запускает его само, если нужно).
+* Windows 10/11 (x64) с WebView2 Runtime (в Windows 11 он уже установлен).
+* Go 1.27+ — только для сборки из исходников. Готовый `.exe` собирать не нужно.
+* Edge или Chrome — приложение само запускает **скрытый headless-браузер**, когда
+  сайт просит пройти проверку Cloudflare. Окно браузера при этом не появляется.
 
 ## Быстрый старт
 
-### 1. Собрать
+### 1. Скачать готовый exe
 
-```powershell
-git clone https://github.com/<ваш-аккаунт>/RutStream.git
-cd RutStream\rutstream
-go build -ldflags "-s -w" -o bin\rutstream.exe ./cmd/rutstream
+Откройте [Releases](https://github.com/mixa7498/RutStream/releases) и скачайте
+`rutstream.exe`. Это один самодостаточный файл: интерфейс, сервер и плеер внутри.
+Запустите его двойным щелчком — консоль не откроется.
+
+Собрать самому можно одной командой (без PowerShell и без внешних скриптов):
+
+```sh
+./build.sh          # собрать и подписать
+./build.sh --no-sign # только собрать
 ```
 
 ### 2. Авторизоваться на rutracker
 
-Приложение ходит на сайт **через ваш браузер** — так проходит проверка Cloudflare,
-которую не проходит обычный HTTP-клиент. Нужен действующий `bb_session`:
+1. Откройте `rutracker.org` в обычном браузере и войдите.
+2. Нажмите `F12` → вкладка **Console**, выполните `document.cookie` и скопируйте
+   всю строку (в ней будут `bb_session` и `cf_clearance`).
+3. В приложении нажмите **«Сессия»** и вставьте строку в поле. «Сохранить».
 
-1. Откройте `rutracker.org` в браузере и войдите.
-2. DevTools → Application → Cookies → `rutracker.org` → скопируйте `bb_session`.
-3. Задайте переменную окружения:
+Cookie хранится только на вашем компьютере, в `%APPDATA%\RutStream\session.cookie`,
+и никуда не отправляется. Пароль приложению не нужен.
 
-```powershell
-$env:RUTSTREAM_COOKIE = "0-12345678-abcdefghijklmnopqrstuvwxyz"
-```
-
-> Пароль в переменных окружения не нужен: `bb_session` — это уже готовая сессия.
+> Можно вставить и одно значение `bb_session`. Но со всей строкой `document.cookie`
+> приложение реже запускает браузер: `cf_clearance` уже прилагается.
 
 ### 3. Запустить
 
-```powershell
-$env:RUTSTREAM_STORAGE = "ram"   # 0 байт на SSD при стриминге
-.\bin\rutstream.exe gui
+Двойной щелчок по `rutstream.exe`. Или из консоли:
+
+```sh
+rutstream.exe gui
 ```
 
-При первом запуске приложение само откроет окно Edge с отладкой. Один раз пройдите
-в нём проверку Cloudflare — дальше cookie живут в профиле приложения.
+Окно браузера при работе **не открывается**. Если rutracker отвечает проверкой
+Cloudflare, приложение незаметно поднимает headless Edge без окна и без значка
+в панели задач. Пока сайт отвечает напрямую, браузер вообще не запускается.
 
 ## Командная строка
 
-```powershell
-rutstream gui                        # приложение с окном
-rutstream forums                     # дерево разделов
-rutstream search "beatles"           # поиск по всему сайту
-rutstream show 6917156               # тема, треклист, сиды, размер
-rutstream plan 6917156               # что и сколько скачается при выборе трека
-rutstream play 6917156 3             # потоковое воспроизведение трека №3
-rutstream download 6917156 3         # скачать трек на диск
-rutstream download 6917156 album     # скачать альбом
-rutstream download 6917156 all       # скачать всю раздачу
-rutstream history                    # история прослушиваний
-rutstream check                      # диагностика доступа к сайту
-rutstream raw /forum/index.php out.html   # сырой HTML (отладка парсеров)
+```sh
+rutstream.exe gui                    # приложение с окном (то же, что без аргументов)
+rutstream.exe forums                 # дерево разделов
+rutstream.exe search "beatles"       # поиск по всему сайту
+rutstream.exe show 6917156           # тема, треклист, сиды, размер
+rutstream.exe plan 6917156           # что и сколько скачается при выборе трека
+rutstream.exe play 6917156 3         # потоковое воспроизведение трека №3
+rutstream.exe download 6917156 3     # скачать трек на диск
+rutstream.exe download 6917156 album # скачать альбом
+rutstream.exe download 6917156 all   # скачать всю раздачу
+rutstream.exe history                # история прослушиваний
+rutstream.exe check                  # диагностика доступа к сайту
+rutstream.exe raw /forum/index.php out.html   # сырой HTML (отладка парсеров)
 ```
 
 Переменные окружения:
 
 | Переменная | Назначение |
 |---|---|
-| `RUTSTREAM_COOKIE` | готовая cookie `bb_session` |
+| `RUTSTREAM_COOKIE` | готовая cookie `bb_session` или вся строка `document.cookie` |
 | `RUTSTREAM_USER` / `RUTSTREAM_PASS` | логин и пароль (альтернатива cookie) |
 | `RUTSTREAM_STORAGE` | `ram` — без записи на SSD; `disk` — по умолчанию |
 | `RUTSTREAM_MEM_LIMIT_MB` | лимит памяти в режиме `ram` (по умолчанию 512) |
 | `RUTSTREAM_MIN_RATIO` | минимальный рейтинг раздачи (по умолчанию 0.5) |
 | `RUTSTREAM_PROXY` | `socks5://host:port` — и для сайта, и для пиров |
-| `RUTSTREAM_CDP_PORT` | порт отладки браузера (по умолчанию 9222) |
+| `RUTSTREAM_NO_BROWSER` | не запускать даже скрытый браузер (часть страниц будет недоступна) |
+| `RUTSTREAM_BROWSER_VISIBLE` | `1` — показать окно браузера (только для отладки) |
+| `RUTSTREAM_CDP_PORT` | порт отладки скрытого браузера (по умолчанию 9222) |
 | `RUTSTREAM_DATA` | каталог данных (по умолчанию `%APPDATA%\RutStream`) |
 
 ## Как это работает
@@ -121,9 +129,10 @@ rutstream raw /forum/index.php out.html   # сырой HTML (отладка па
 ```
 
 1. **Транспорт.** Cloudflare проверяет TLS-отпечаток клиента, поэтому «скопированная»
-   cookie не работает. Приложение подключается к вашему браузеру по протоколу
-   Chrome DevTools и выполняет запросы прямо в нём — проверка Cloudflare проходит
-   естественно, как для обычного пользователя.
+   cookie не всегда работает. Если прямой запрос упирается в проверку, приложение
+   незаметно запускает headless Edge (без окна) и выполняет запросы в нём — проверка
+   проходит как для обычного пользователя. Браузер живёт только пока нужен, и
+   закрывается вместе с приложением.
 2. **Индекс.** По названию раздачи и треклисту с сайта сопоставляются файлы торрента;
    для однофайловых релизов заголовок файла читается на лету (это инициирует
    докачку нужного куска) и разбирается cue-файл.
@@ -137,12 +146,20 @@ rutstream raw /forum/index.php out.html   # сырой HTML (отладка па
 
 ## Подпись приложения
 
-Без подписи Windows Smart App Control блокирует запуск неподписанных бинарников.
-Самоподписанный сертификат снимает предупреждение «неизвестный издатель»
-на машинах, где его установят:
+Без подписи Windows Smart App Control может блокировать запуск неподписанных
+бинарников. Самоподписанный сертификат снимает предупреждение «неизвестный
+издатель» на машинах, где его установят:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\sign.ps1 -Exe rutstream\bin\rutstream.exe -Create
+```sh
+./build.sh              # сборка + подпись, сертификат создаётся сам
+```
+
+Сертификат создаётся рядом с бинарником: `rutstream/bin/rutstream-cert.cer`.
+Чтобы Windows ему доверяла, установите его один раз из cmd от администратора:
+
+```bat
+certutil -addstore Root "rutstream\bin\rutstream-cert.cer"
+certutil -addstore TrustedPublisher "rutstream\bin\rutstream-cert.cer"
 ```
 
 Для распространения публично нужна подпись публичным удостоверяющим центром —
@@ -150,9 +167,9 @@ powershell -ExecutionPolicy Bypass -File tools\sign.ps1 -Exe rutstream\bin\rutst
 
 ## Ограничения
 
-* **Нужен браузер с отладкой.** Приложение запускает его сам, но если браузер уже
-  открыт обычным образом, может потребоваться закрыть его и запустить заново.
 * **Аккаунт rutracker** с действующей сессией: без неё недоступны закрытые разделы.
+* Если сайт просит капчу, которую headless-браузер не проходит автоматически,
+  можно один раз запустить его с окном: `RUTSTREAM_BROWSER_VISIBLE=1`.
 * **Приватные трекеры** rutracker отдают пиров только участникам раздачи.
 * Часть треков внутри альбома требует скачать данные до их начала — формат FLAC
   не позволяет начать с произвольного места (см. STATUS.md).
@@ -162,7 +179,7 @@ powershell -ExecutionPolicy Bypass -File tools\sign.ps1 -Exe rutstream\bin\rutst
 
 ## Разработка
 
-```powershell
+```sh
 cd rutstream
 go test ./...                 # все тесты
 go test -race ./...           # с проверкой гонок

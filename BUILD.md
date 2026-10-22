@@ -1,227 +1,158 @@
-# Сборка и запуск RutStream
+# Сборка и публикация RutStream
 
-> **Важно про окружение этой машины.** Включён **Windows Smart App Control**
-> (`VerifiedAndReputablePolicyState = 1`): он блокирует запуск новых
-> неподписанных исполняемых файлов — включая `go test` и даже `compile.exe`.
-> Политику ОС обходить нельзя, поэтому **разработка и проверки выполняются в WSL**,
-> а Windows-сборка используется только как артефакт для запуска у пользователя
-> (после снятия блокировки или с подписью от публичного CA).
+RutStream собирается в **один самодостаточный `.exe`**: внутри интерфейс,
+локальный сервер, плеер и все ресурсы. Никаких PowerShell-скриптов и внешних
+сборочных инструментов не требуется.
 
 ## 1. Требования
 
 | Компонент | Версия | Зачем |
 |---|---|---|
-| Go | 1.24+ (проверено 1.27.3) | сборка |
-| WSL2 (Ubuntu) | — | среда сборки и запуска тестов на этой машине |
-| ffmpeg | 6/7 (опционально) | AAC/ALAC/APE/WavPack/DSD — их не умеет встроенный декодер |
-| Браузер | Chrome или Edge | только для ручного импорта cookie (см. §5) |
+| Windows | 10/11 x64 | целевая платформа |
+| WebView2 Runtime | любая | окно приложения (в Windows 11 уже есть) |
+| Go | 1.27+ | только для сборки из исходников |
+| Edge или Chrome | любая | скрытый headless-браузер для проверки Cloudflare |
+| Git Bash | — | запуск `build.sh` (или используйте `make`) |
 
-## 2. Сборка и тесты в WSL (основной цикл)
+Готовый `rutstream.exe` лежит в [Releases](https://github.com/mixa7498/RutStream/releases) —
+собирать ничего не нужно.
 
-```powershell
-# автоматически: синхронизация проекта + сборка + тесты
-powershell -ExecutionPolicy Bypass -File tools\sync-wsl.ps1
+## 2. Сборка
+
+```sh
+./build.sh              # собрать и подписать
+./build.sh --no-sign    # только собрать
 ```
 
-Вручную:
+или:
 
-```powershell
-$proj = "C:\Users\mixa7\Documents\RutStream\rutstream"
-
-# 1) копируем исходники в WSL через tar-пайп (диски Windows в WSL не смонтированы)
-cmd /c "tar -cf - --exclude=bin --exclude=.git -C ""$proj"" . | wsl.exe -d Ubuntu -e sh -lc ""mkdir -p /home/cholobobo/rutstream && tar -C /home/cholobobo/rutstream -xf -"""
-
-# 2) сборка и тесты
-wsl -d Ubuntu -e sh -lc "cd /home/cholobobo/rutstream && export PATH=$HOME/go/bin:$PATH GOPATH=$HOME/gopath GOMODCACHE=$HOME/gomod GOCACHE=$HOME/.cache/go-build GOPROXY=file://$HOME/gomod/cache/download GOSUMDB=off GOFLAGS=-mod=mod CGO_ENABLED=0 && go build -tags nodevice ./... && go test -tags nodevice ./..."
+```sh
+make sign               # сборка + подпись
+make build              # только сборка
+make test               # тесты
+make vet                # статический анализ
 ```
 
-Подготовка окружения WSL (однократно):
+Результат — `rutstream/bin/rutstream.exe`. Это один файл; рядом появляются
+только материалы подписи (`rutstream-cert.cer`, `rutstream-key.pfx`), без которых
+приложение всё равно работает.
 
-```bash
-# Go
-curl -sSLo /tmp/go.tgz https://go.dev/dl/go1.27.3.linux-amd64.tar.gz
-tar -C ~ -xzf /tmp/go.tgz && rm /tmp/go.tgz
-export PATH=$HOME/go/bin:$PATH
+Особенности сборки:
 
-# кэш модулей: на Windows это %TEMP%\opencode\gopath\pkg\mod\cache\download —
-# его можно использовать как file-based GOPROXY
+* `-H windowsgui` — при двойном щелчке консоль не открывается. При запуске из
+  cmd/PowerShell приложение само подключается к родительской консоли, поэтому
+  команды `check`, `search` и другие по-прежнему печатают вывод.
+* `-s -w` — обязательны: с полной таблицей символов Windows Code Integrity
+  может отклонить файл.
+* Версия передаётся через `-X main.version=…` и попадает в журнал.
+
+Кросс-сборка из Linux/macOS:
+
+```sh
+make windows
 ```
 
-Тег `nodevice` отключает зависимость от звуковой карты (`oto` требует ALSA/ALSA-dev).
-Без него сборка на Windows и macOS работает как есть.
+## 3. Тесты
 
-## 3. Сборка приложения для Windows
-
-```powershell
-$env:GOPATH="$env:TEMP\opencode\gopath"; $env:GOMODCACHE="$env:GOPATH\pkg\mod"; $env:GOCACHE="$env:GOPATH\build-cache"
-$go="$env:TEMP\opencode\go\bin\go.exe"      # либо просто `go`
-
-cd C:\Users\mixa7\Documents\RutStream\rutstream
-& $go build -ldflags "-s -w" -o bin\rutstream.exe ./cmd/rutstream
-& $go build -ldflags "-s -w" -o bin\spike.exe     ./cmd/spike
+```sh
+cd rutstream
+go test ./...
+go test -race ./...
+go build -tags nodevice ./...   # без звуковой карты (CI, Linux)
 ```
 
-> **Важно: `-ldflags "-s -w"` обязателен.** С полной таблицей символов Code Integrity
-> отклоняет файл («did not meet the Enterprise signing level requirements»).
+## 4. Авторизация
 
-> На этой машине компилятор Go тоже блокируется политикой, поэтому Windows-сборку
-> выполняйте на машине без Smart App Control либо в WSL с `GOOS=windows`:
-> ```bash
-> GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o rutstream.exe ./cmd/rutstream
-> ```
+Пароль приложению не нужен. Сессия вводится **в окне приложения**:
 
-## 4. Переменные окружения
+1. Войдите на `rutracker.org` в обычном браузере.
+2. `F12` → Console → `document.cookie` → скопируйте всю строку.
+3. В приложении нажмите **«Сессия»**, вставьте строку и сохраните.
 
-| Переменная | Назначение |
-|---|---|
-| `RUTSTREAM_USER` / `RUTSTREAM_PASS` | логин и пароль rutracker (вход по форме) |
-| `RUTSTREAM_COOKIE` | готовая cookie `bb_session` (альтернатива логину) |
-| `RUTSTREAM_PROXY` | `socks5://host:port` или `http://host:port` — и для сайта, и для P2P-пиров |
-| `RUTSTREAM_DATA` | каталог данных (по умолчанию `%APPDATA%\RutStream`) |
+Cookie хранится в `%APPDATA%\RutStream\session.cookie` и никуда не отправляется.
+Для автоматизации можно задать `RUTSTREAM_COOKIE` (тоже полная строка или
+только `bb_session`).
 
-## 5. Авторизация на rutracker
+## 5. Проверка доступа
 
-Форум закрыт Cloudflare-challenge для «не-браузерных» клиентов, поэтому два пути:
-
-**Путь A — импорт cookie (рекомендуется).**
-1. Войдите на rutracker в обычном браузере.
-2. DevTools → Application → Cookies → `rutracker.org` → `bb_session` → скопируйте значение.
-3. ```powershell
-   $env:RUTSTREAM_COOKIE = "0-xxxxxxxx-xxxxxxxxxxxx"
-   ```
-
-**Путь B — вход по логину/паролю.**
-```powershell
-$env:RUTSTREAM_USER = "ваш_логин"
-$env:RUTSTREAM_PASS = "ваш_пароль"
-```
-Если страница логина отдаёт challenge — используйте путь A.
-
-## 6. Smart App Control: что делать, чтобы приложение запускалось
-
-Диагностика (журнал Code Integrity):
-```powershell
-Get-WinEvent -LogName "Microsoft-Windows-CodeIntegrity/Operational" -MaxEvents 5 |
-  Select-Object TimeCreated, Message
-Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy" |
-  Select-Object VerifiedAndReputablePolicyState
+```sh
+rutstream.exe check
 ```
 
-Варианты:
+Команда показывает зеркало, наличие `bb_session` и `cf_clearance`, авторизацию,
+чтение темы, поиск и состояние скрытого браузера. Журнал приложения:
+`%APPDATA%\RutStream\logs\rutstream.log`.
 
-1. **Отключить Smart App Control** (нужны права администратора):
-   «Параметры Windows» → «Безопасность Windows» → «Параметры защиты от вирусов и угроз» →
-   «Управление приложениями и браузером» → «Управление приложениями» →
-   «Управление приложениями Smart App Control» → «Выключить».
-2. **Подписать приложение сертификатом публичного CA** — тогда SAC доверяет приложению
-   автоматически на любой машине (нужна покупка OV/EV code signing сертификата).
-   Самоподпись **не подходит**: SAC требует «Enterprise signing level», то есть цепочку
-   до CA из программы Microsoft Trusted Root.
-3. Проверять и тестировать в среде без этой политики (WSL/CI).
+## 6. Как работает обход Cloudflare
 
-### 6.1. Подпись приложения
+Cloudflare проверяет не только cookie, но и TLS/JS-отпечаток клиента. Поэтому:
 
-Готовый скрипт: `tools\sign.ps1`.
+1. Пока сайт отвечает напрямую, приложение работает обычным HTTP-клиентом —
+   браузер не запускается вообще.
+2. При первом challenge приложение незаметно запускает **headless Edge**
+   (`--headless=new`) с отдельным профилем в `%APPDATA%\RutStream\browser`.
+   Окна и значка в панели задач нет.
+3. Браузеру подставляется обычный User-Agent (без `HeadlessChrome`), получает
+   `cf_clearance`, cookie переносятся в HTTP-клиент. Браузер закрывается вместе
+   с приложением.
 
-```powershell
-# самоподписанный сертификат (снимает «неизвестный издатель» там,
-# где сертификат установлен в «Доверенные корневые центры»)
-powershell -ExecutionPolicy Bypass -File tools\sign.ps1 -Exe rutstream\bin\rutstream.exe -Create
+Отладка:
 
-# свой сертификат публичного CA
-powershell -ExecutionPolicy Bypass -File tools\sign.ps1 -Exe rutstream\bin\rutstream.exe -PfxPath cert.pfx
+* `RUTSTREAM_BROWSER_VISIBLE=1` — показать окно браузера (например, если сайт
+  просит капчу).
+* `RUTSTREAM_NO_BROWSER=1` — вообще не запускать браузер.
+* `RUTSTREAM_CDP_PORT=9222` — порт отладки.
+
+## 7. Подпись
+
+```sh
+./build.sh
 ```
 
-Скрипт создаёт (или импортирует) сертификат, подписывает EXE с меткой времени
-(DigiCert) и выкладывает рядом `rutstream-cert.cer` — его нужно установить на
-других машинах:
+`build.sh` создаёт самоподписанный сертификат и подписывает копию бинарника
+(работающий файл Windows подписать не даёт). Установка сертификата — один раз,
+из cmd от администратора:
 
-```powershell
-# от администратора
-Import-Certificate -FilePath rutstream-cert.cer -CertStoreLocation Cert:\LocalMachine\Root
-Import-Certificate -FilePath rutstream-cert.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
+```bat
+certutil -addstore Root "rutstream\bin\rutstream-cert.cer"
+certutil -addstore TrustedPublisher "rutstream\bin\rutstream-cert.cer"
 ```
 
-Проверка:
-```powershell
-Get-AuthenticodeSignature rutstream\bin\rutstream.exe | Format-List Status,SignerCertificate
+Для подписи сертификатом публичного CA:
+
+```sh
+rutstream.exe sign --pfx cert.pfx --password "…" rutstream.exe
 ```
 
-### 6.2. Где взять сертификат публичного CA
+Smart App Control доверяет только цепочке публичного CA; самоподпись снимает
+предупреждение «неизвестный издатель» там, где сертификат установлен вручную.
+Для open-source проекта допустим вариант без подписи: релиз + SHA-256.
 
-| Вариант | Цена | Нюансы |
-|---|---|---|
-| Microsoft Trusted Signing (Azure Code Signing) | от ~$10/мес | проверка личности **организации**; физлицу в РФ практически недоступно |
-| Sectigo / Certum code signing (DV) | от ~$70/год | нужна проверка личности (для физлица — по паспорту) |
-| DigiCert / GlobalSign (OV, EV) | от ~$200/год | то же + дороже |
-| **Без подписи, GitHub Releases + SHA-256** | бесплатно | так распространяют ManyGUI, PortableApps и др.: пользователь сверяет хеш |
+## 8. Публикация на GitHub
 
-Для open-source проекта практичнее последний вариант: в релиз кладутся EXE и
-файл с SHA-256, в README — команда проверки. Пользователь запускает файл,
-сверяет хеш и при желании сам ставит сертификат из `rutstream-cert.cer`.
-
-### 6.3. Браузер с отладкой
-
-Cloudflare проверяет TLS-отпечаток клиента, поэтому запросы к сайту идут
-**из браузера пользователя** по протоколу Chrome DevTools.
-
-* Приложение **запускает браузер само** (Edge/Chrome с отдельным профилем
-  в `%APPDATA%\RutStream\browser`), если тот ещё не запущен с отладкой.
-* Если браузер уже открыт обычным образом, он не примет порт отладки —
-  закройте его и запустите приложение снова.
-* Один раз пройдите в окне браузера проверку Cloudflare — дальше cookie
-  живут в профиле приложения.
-
-## 7. Публикация на GitHub
-
-Скрипт `tools\publish.ps1` делает всё: создаёт репозиторий, отправляет ветку и
-теги, собирает и подписывает EXE, создаёт релиз с файлом SHA-256.
-
-```powershell
-# один раз: авторизация GitHub CLI (откроется браузер)
-gh auth login --web
-
-# публикация
-powershell -ExecutionPolicy Bypass -File tools\publish.ps1 -Name RutStream -Visibility public -Version v0.1.0
+```sh
+gh auth login --web     # один раз
+tools/publish.sh v0.2.0
 ```
 
-Что делает скрипт:
+Скрипт собирает и подписывает exe, коммитит изменения, ставит тег, отправляет
+ветку и тег, создаёт GitHub Release с `rutstream.exe`, `rutstream.exe.sha256`
+и `rutstream-cert.cer`.
 
-1. `gh repo create` — репозиторий с текущей веткой как `origin` (или добавляет
-   remote, если репозиторий уже создан).
-2. `git push` — ветка и тег версии.
-3. `go build -ldflags "-s -w"` — сборка EXE.
-4. `tools\sign.ps1` — подпись сертификатом.
-5. `gh release create` — релиз с EXE и `rutstream.exe.sha256`.
+Проверка скачанного файла без PowerShell:
 
-Пользователю остаётся сверить хеш:
-
-```powershell
-(Get-FileHash -Algorithm SHA256 rutstream.exe).Hash.ToLower()
+```bat
+certutil -hashfile rutstream.exe SHA256
 ```
 
-и сверить его с содержимым `rutstream.exe.sha256` из релиза.
+Сверьте вывод с содержимым `rutstream.exe.sha256` из релиза.
 
-## 8. Проверочный стенд (Phase 0)
+## 9. Диагностика
 
-```powershell
-.\bin\spike.exe local           # H4: из раздачи 24 МБ скачивается только нужный файл (~2 МБ)
-.\bin\spike.exe announce http://bt2.t-ru.org/ann   # H3: трекер отвечает bencode
-.\bin\spike.exe feed 1760       # живой Atom-фид раздела (без авторизации)
-.\bin\spike.exe search "beatles" 1698   # поиск (нужна сессия)
-.\bin\spike.exe topic 6924752   # разбор темы
-.\bin\spike.exe files 6924752   # список файлов раздачи
-```
-
-## 8. Приложение
-
-```powershell
-$env:RUTSTREAM_COOKIE = "<bb_session>"
-.\bin\rutstream.exe forums                       # дерево разделов музыки
-.\bin\rutstream.exe search beatles 1698          # поиск раздач
-.\bin\rutstream.exe show <topicID>               # метаданные и треклист
-.\bin\rutstream.exe plan <topicID>               # что и сколько скачается
-.\bin\rutstream.exe play <topicID> 7             # потоковое воспроизведение трека №7
-.\bin\rutstream.exe download <topicID> 7         # скачать трек целиком
-.\bin\rutstream.exe history                      # история прослушиваний
-```
+* Приложение не запускается — проверьте, установлен ли WebView2 Runtime:
+  <https://developer.microsoft.com/microsoft-edge/webview2/>
+* Нет авторизации — обновите cookie в окне «Сессия»; проверьте `rutstream.exe check`.
+* Поиск/темы не открываются — посмотрите `%APPDATA%\RutStream\logs\rutstream.log`;
+  при необходимости запустите с `RUTSTREAM_BROWSER_VISIBLE=1`.
+* Smart App Control блокирует exe — подпишите его или отключите политику в
+  «Параметры Windows → Безопасность Windows».

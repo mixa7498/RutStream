@@ -8,6 +8,8 @@ const state = {
   topic: null,
   topics: [],       // сырые результаты поиска (до сортировки/фильтров)
   artist: '',
+  sessionOpen: false,
+  sessionInit: false,
 };
 
 function human(n) {
@@ -393,6 +395,14 @@ async function poll() {
       }
     }
     $('#status').textContent = st.loggedIn ? 'сессия активна' : 'нет авторизации';
+    // Поле ввода cookie показываем автоматически, пока авторизации нет.
+    // Кнопка «Сессия» позволяет открыть его в любой момент.
+    if (!state.sessionInit) {
+      state.sessionOpen = !st.loggedIn;
+      state.sessionInit = true;
+    }
+    const bar = $('#session-bar');
+    if (bar) bar.hidden = !!st.loggedIn && !state.sessionOpen;
 
     // Рейтинг раздачи (Ratio Guard).
     const r = st.ratio || {};
@@ -413,6 +423,55 @@ async function poll() {
   }
 }
 
+// ---------------------------------------------------------------- сессия
+
+async function saveSession() {
+  const value = $('#session-input').value.trim();
+  const msg = $('#session-msg');
+  if (!value) {
+    msg.textContent = 'Вставьте строку cookie (document.cookie)';
+    msg.className = 'session-msg err';
+    return;
+  }
+  msg.textContent = 'Сохраняем…';
+  msg.className = 'session-msg';
+  try {
+    const r = await api('session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie: value }),
+    });
+    msg.textContent = r.hasClearance
+      ? 'Сохранено: сессия и cookie Cloudflare'
+      : 'Сохранено. Совет: копируйте всю строку document.cookie — в ней есть cf_clearance.';
+    msg.className = 'session-msg ok';
+    $('#session-input').value = '';
+    state.sessionOpen = false;
+    $('#session-bar').hidden = true;
+    poll();
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.className = 'session-msg err';
+  }
+}
+
+async function clearSession() {
+  const msg = $('#session-msg');
+  try {
+    await api('session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: true }),
+    });
+    msg.textContent = 'Сессия удалена';
+    msg.className = 'session-msg';
+    poll();
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.className = 'session-msg err';
+  }
+}
+
 // ---------------------------------------------------------------- запуск
 
 $('#search-form').onsubmit = (e) => {
@@ -420,6 +479,32 @@ $('#search-form').onsubmit = (e) => {
   search();
 };
 $('#stop').onclick = stop;
+$('#session-save').onclick = saveSession;
+$('#session-clear').onclick = clearSession;
+$('#session-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') saveSession();
+});
+$('#session-btn').onclick = () => {
+  state.sessionOpen = !state.sessionOpen;
+  $('#session-bar').hidden = !state.sessionOpen;
+  if (state.sessionOpen) $('#session-input').focus();
+};
+$('#help').onclick = () => { $('#help-modal').hidden = false; };
+$('#help-close').onclick = () => {
+  $('#help-modal').hidden = true;
+  try { localStorage.setItem('rutstream-help-seen', '1'); } catch (e) { /* нет доступа */ }
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    $('#help-modal').hidden = true;
+    state.sessionOpen = false;
+    $('#session-bar').hidden = true;
+  }
+});
+// Первый запуск: показываем справку сразу.
+try {
+  if (!localStorage.getItem('rutstream-help-seen')) $('#help-modal').hidden = false;
+} catch (e) { /* нет доступа */ }
 $('#sort').onchange = applyFiltersSort;
 ['#f-lossless', '#f-seeded', '#f-collections'].forEach((sel) => {
   $(sel).onchange = applyFiltersSort;

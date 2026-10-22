@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
@@ -35,13 +36,28 @@ import (
 	"github.com/mixa7/rutstream/internal/torrent"
 )
 
+// version — версия сборки. Переопределяется при сборке:
+//
+//	go build -ldflags "-X main.version=0.2.0"
+var version = "0.2.0-dev"
+
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
+	// Сборка идёт как GUI-приложение (-H windowsgui), поэтому при запуске
+	// из cmd/PowerShell подключаемся к родительской консоли, чтобы работали
+	// команды check/search и их вывод.
+	attachConsole()
+	setupLogging()
+
 	ctx := context.Background()
 	var err error
+	// Без аргументов (двойной щелчок по exe) сразу открываем окно.
+	if len(os.Args) < 2 {
+		err = cmdGUI(ctx, nil)
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	switch os.Args[1] {
 	case "forums":
 		err = cmdForums(ctx)
@@ -57,6 +73,8 @@ func main() {
 		err = cmdDownload(ctx, os.Args[2:])
 	case "gui":
 		err = cmdGUI(ctx, os.Args[2:])
+	case "sign":
+		err = cmdSign(ctx, os.Args[2:])
 	case "raw":
 		err = cmdRaw(ctx, os.Args[2:])
 	case "history":
@@ -91,23 +109,64 @@ func usage() {
   rutstream download <topicID> <трек>   скачать трек целиком
   rutstream history                     история прослушиваний
   rutstream gui                         приложение с окном (разделы, поиск, плеер)
+  rutstream (без аргументов)            то же, что gui: открыть окно
+  rutstream sign [файл]                 подписать бинарник (сертификат создаётся сам)
 
 Переменные окружения:
   RUTSTREAM_USER / RUTSTREAM_PASS  логин и пароль rutracker
-  RUTSTREAM_COOKIE                готовая cookie bb_session
+  RUTSTREAM_COOKIE                готовая cookie bb_session (или вся строка document.cookie)
   RUTSTREAM_PROXY                 socks5://host:port для сайта и пиров
+  RUTSTREAM_NO_BROWSER            не запускать скрытый браузер (часть страниц недоступна)
+  RUTSTREAM_BROWSER_VISIBLE=1     показать окно браузера (для отладки)
+  RUTSTREAM_CDP_PORT              порт отладки скрытого браузера (по умолчанию 9222)
   RUTSTREAM_DATA                  каталог данных (по умолчанию %APPDATA%/RutStream)`)
+}
+
+// setupLogging пишет журнал в каталог данных: у GUI-приложения нет консоли,
+// и без файла причину ошибки было бы не видно.
+func setupLogging() {
+	base := os.Getenv("RUTSTREAM_DATA")
+	if base == "" {
+		if dir, err := os.UserConfigDir(); err == nil {
+			base = filepath.Join(dir, "RutStream")
+		} else {
+			base = os.TempDir()
+		}
+	}
+	dir := filepath.Join(base, "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "rutstream.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	// Файл не закрываем: он живёт столько же, сколько процесс.
+	var out io.Writer = f
+	if os.Getenv("RUTSTREAM_DEBUG") != "" {
+		out = io.MultiWriter(f, os.Stderr)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+	slog.Info("запуск", "version", version, "pid", os.Getpid())
 }
 
 // ---------------------------------------------------------------- каркас --
 
 type app struct {
-	client   *rutracker.Client
-	store    *catalog.Store
-	engine   *torrent.Engine
-	dataDir  string
-	loggedIn bool
-	cdp      *rutracker.CDP
+	client  *rutracker.Client
+	store   *catalog.Store
+	engine  *torrent.Engine
+	dataDir string
+
+	// browserMu защищает ленивый запуск скрытого браузера.
+	browserMu sync.Mutex
+	cdp       *rutracker.CDP
+	// browserProc — процесс браузера, если его запустили мы (его и закрываем).
+	browserProc *os.Process
+	loggedIn    bool
 }
 
 func newApp() (*app, error) {
@@ -128,9 +187,16 @@ func newAppWithStorage(storage string) (*app, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, err
 	}
+	// appRef нужен, чтобы клиент мог лениво поднять скрытый браузер:
+	// замыкание ссылается на приложение, которое создаётся ниже.
+	var appRef *app
 	opts := rutracker.Options{
-		ProxyURL: os.Getenv("RUTSTREAM_PROXY"),
-		Timeout:  30 * time.Second,
+		ProxyURL:  os.Getenv("RUTSTREAM_PROXY"),
+		Timeout:   30 * time.Second,
+		UserAgent: rutracker.BrowserUserAgent(),
+		EnsureTransport: func(ctx context.Context) (rutracker.Transport, error) {
+			return appRef.ensureBrowser(ctx)
+		},
 	}
 	c, err := rutracker.New(opts)
 	if err != nil {
@@ -155,87 +221,136 @@ func newAppWithStorage(storage string) (*app, error) {
 		}
 	}
 	engine, err := torrent.New(torrent.Options{
-		DataDir:       filepath.Join(dataDir, "data"),
-		ProxyURL:      os.Getenv("RUTSTREAM_PROXY"),
-		DisableDHT:    true,
-		DisablePEX:    true,
+		DataDir:         filepath.Join(dataDir, "data"),
+		ProxyURL:        os.Getenv("RUTSTREAM_PROXY"),
+		DisableDHT:      true,
+		DisablePEX:      true,
 		DisableWebseeds: true,
-		Seed:          true,
-		StorageMode:   storageMode,
-		MemLimit:      memLimit,
+		Seed:            true,
+		StorageMode:     storageMode,
+		MemLimit:        memLimit,
+		Logger:          slog.Default(),
 	})
 	if err != nil {
 		store.Close()
 		return nil, err
 	}
 	a := &app{client: c, store: store, engine: engine, dataDir: dataDir}
+	appRef = a
 	a.applySession()
-	a.attachBrowser()
 	return a, nil
 }
 
-// attachBrowser подключает браузерный транспорт, если пользователь запустил
-// Edge/Chrome с --remote-debugging-port. Это снимает Cloudflare-challenge:
-// запросы идут из настоящего браузера с вашим профилем и cookie.
+// ensureBrowser поднимает скрытый браузер при первом Cloudflare-challenge.
 //
-// Если браузер с отладкой не запущен, приложение запускает его само
-// (с отдельным профилем в каталоге данных): один раз пройдите проверку
-// Cloudflare в открывшемся окне — и дальше cookie живут в профиле приложения.
-func (a *app) attachBrowser() {
+// Браузер работает без окна (headless) и с обычным User-Agent, поэтому
+// пользователь не видит ни окна, ни значка в панели задач. Пока сайт
+// отвечает напрямую, браузер вообще не запускается.
+func (a *app) ensureBrowser(ctx context.Context) (rutracker.Transport, error) {
+	a.browserMu.Lock()
+	defer a.browserMu.Unlock()
+
+	if a.cdp != nil {
+		return rutracker.NewCDPTransport(a.cdp), nil
+	}
+	if os.Getenv("RUTSTREAM_NO_BROWSER") != "" {
+		return nil, fmt.Errorf("запуск браузера отключён (RUTSTREAM_NO_BROWSER)")
+	}
 	port := rutracker.DefaultCDPPort
 	if v := os.Getenv("RUTSTREAM_CDP_PORT"); v != "" {
 		port = rutracker.PortFromArg(v)
 	}
+
+	var proc *os.Process
 	if !rutracker.CDPAvailable(port) {
 		profile := filepath.Join(a.dataDir, "browser")
-		if err := rutracker.OpenBrowserWithProfile(port, profile); err == nil {
-			for i := 0; i < 40; i++ {
-				if rutracker.CDPAvailable(port) {
-					break
-				}
-				time.Sleep(500 * time.Millisecond)
+		p, err := rutracker.OpenBrowserWithProfile(port, profile)
+		if err != nil {
+			return nil, err
+		}
+		proc = p
+		// Ждём, пока поднимется отладочный порт. Обычно это 1–3 секунды.
+		for i := 0; i < 80; i++ {
+			if rutracker.CDPAvailable(port) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				_ = proc.Kill()
+				return nil, ctx.Err()
+			case <-time.After(250 * time.Millisecond):
 			}
 		}
 	}
 	if !rutracker.CDPAvailable(port) {
-		fmt.Fprintln(os.Stderr, "предупреждение: браузер с отладкой недоступен — часть страниц сайта будет недоступна")
-		return
+		if proc != nil {
+			_ = proc.Kill()
+		}
+		return nil, fmt.Errorf("скрытый браузер не запустился (порт %d)", port)
 	}
+
 	cdp, err := rutracker.ConnectCDP(port)
 	if err != nil {
-		return
+		if proc != nil {
+			_ = proc.Kill()
+		}
+		return nil, err
 	}
 	a.cdp = cdp
-	a.client.SetTransport(rutracker.NewCDPTransport(cdp))
-	// Заодно подтягиваем cookie браузера (в т.ч. cf_clearance и bb_session).
+	a.browserProc = proc
+
+	// Переносим сессию в браузер: вкладка нужна, чтобы cookie вообще
+	// установились, а затем перезагружаем форум — Cloudflare выдаст
+	// cf_clearance уже для авторизованной сессии.
+	index := a.client.Mirror() + "/forum/index.php"
+	_, _ = cdp.Fetch(index, 90*time.Second)
+	for _, ck := range a.client.Cookies() {
+		if ck.Value == "" {
+			continue
+		}
+		path := ck.Path
+		if path == "" {
+			path = "/"
+		}
+		_ = cdp.SetCookie(&rutracker.BrowserCookie{
+			Name:     ck.Name,
+			Value:    ck.Value,
+			Domain:   ".rutracker.org",
+			Path:     path,
+			HTTPOnly: ck.HttpOnly,
+			Secure:   true,
+		})
+	}
+	_, _ = cdp.Fetch(index, 90*time.Second)
+
+	// Забираем из браузера свежие cookie (в первую очередь cf_clearance),
+	// чтобы обычный HTTP-клиент тоже проходил проверку.
 	if cookies, err := cdp.Cookies(); err == nil {
 		a.client.ImportCookiesTo(cookies)
 	}
-	// И наоборот: переносим нашу сессию в браузер, чтобы защищённые страницы
-	// открывались авторизованными (Cloudflare пропускает браузер, но не наш
-	// HTTP-клиент, поэтому ходим через него).
-	if session := a.client.SessionCookie(); session != "" {
-		// Cookie ставится в контексте вкладки — сначала открываем её.
-		if err := cdp.EnsureTab(a.client.Mirror() + "/forum/index.php"); err == nil {
-			if err := cdp.SetCookie(&rutracker.BrowserCookie{
-				Name:     "bb_session",
-				Value:    session,
-				Domain:   "rutracker.org",
-				Path:     "/forum/",
-				HTTPOnly: true,
-				Secure:   true,
-			}); err != nil {
-				fmt.Fprintln(os.Stderr, "предупреждение: не удалось передать cookie в браузер:", err)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "предупреждение: не удалось открыть вкладку браузера:", err)
-		}
-	}
+	return rutracker.NewCDPTransport(cdp), nil
+}
+
+// browserReady сообщает, запущен ли скрытый браузер.
+func (a *app) browserReady() bool {
+	a.browserMu.Lock()
+	defer a.browserMu.Unlock()
+	return a.cdp != nil
 }
 
 func (a *app) close() {
+	a.browserMu.Lock()
 	if a.cdp != nil {
 		a.cdp.Close()
+		a.cdp = nil
+	}
+	proc := a.browserProc
+	a.browserProc = nil
+	a.browserMu.Unlock()
+	// Браузер запускали мы — мы же его и закрываем. Если он был запущен
+	// пользователем (порт уже слушал), не трогаем чужой процесс.
+	if proc != nil {
+		_ = proc.Kill()
 	}
 	a.engine.Close()
 	a.store.Close()
@@ -243,7 +358,14 @@ func (a *app) close() {
 
 // applySession переносит учётные данные из окружения или из сохранённого файла.
 func (a *app) applySession() {
-	if ck := strings.TrimSpace(os.Getenv("RUTSTREAM_COOKIE")); ck != "" {
+	// Переменная окружения может содержать как голое значение bb_session,
+	// так и всю строку document.cookie (тогда там есть и cf_clearance).
+	if text := strings.TrimSpace(os.Getenv("RUTSTREAM_COOKIE")); text != "" {
+		a.client.SetCookieSet(rutracker.ExtractCookieSet(text))
+		ck := rutracker.ExtractSessionCookie(text)
+		if ck == "" {
+			ck = text
+		}
 		a.client.SetSessionCookie(ck)
 		a.loggedIn = true
 		return
@@ -277,6 +399,74 @@ func (a *app) sessionFile() string {
 	return filepath.Join(a.dataDir, "session.cookie")
 }
 
+// setSessionFromGUI применяет cookie сессии, введённый в окне приложения.
+//
+// Принимаем как голое значение bb_session, так и всю строку document.cookie:
+// во втором случае сохраняется и cf_clearance — с ней обычный HTTP-клиент
+// проходит проверку Cloudflare без запуска браузера.
+func (a *app) setSessionFromGUI(text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return fmt.Errorf("пустая cookie")
+	}
+	set := rutracker.ExtractCookieSet(text)
+	session := set["bb_session"]
+	if session == "" {
+		session = rutracker.ExtractSessionCookie(text)
+	}
+	if session == "" {
+		return fmt.Errorf("в строке нет bb_session")
+	}
+	set["bb_session"] = session
+	a.client.SetCookieSet(set)
+	a.client.SetSessionCookie(session)
+	if err := a.saveSession(text); err != nil {
+		return err
+	}
+
+	// Если скрытый браузер уже запущен — обновляем cookie и в нём.
+	a.browserMu.Lock()
+	cdp := a.cdp
+	a.browserMu.Unlock()
+	if cdp != nil {
+		for name, value := range set {
+			if value == "" {
+				continue
+			}
+			path := "/"
+			if name == "bb_session" {
+				path = "/forum/"
+			}
+			_ = cdp.SetCookie(&rutracker.BrowserCookie{
+				Name:     name,
+				Value:    value,
+				Domain:   ".rutracker.org",
+				Path:     path,
+				HTTPOnly: name == "bb_session",
+				Secure:   true,
+			})
+		}
+	}
+	a.loggedIn = true
+	return nil
+}
+
+// clearSession удаляет сохранённую сессию.
+func (a *app) clearSession() {
+	_ = os.Remove(a.sessionFile())
+	a.client.SetSessionCookie("")
+	a.browserMu.Lock()
+	cdp := a.cdp
+	a.browserMu.Unlock()
+	if cdp != nil {
+		_ = cdp.SetCookie(&rutracker.BrowserCookie{
+			Name: "bb_session", Value: "", Domain: ".rutracker.org", Path: "/forum/",
+			HTTPOnly: true, Secure: true,
+		})
+	}
+	a.loggedIn = false
+}
+
 // saveSession сохраняет cookie на диск (вход — один раз).
 func (a *app) saveSession(text string) error {
 	return os.WriteFile(a.sessionFile(), []byte(strings.TrimSpace(text)), 0o600)
@@ -286,8 +476,8 @@ func (a *app) saveSession(text string) error {
 //
 // Форум закрыт Cloudflare-challenge для программных клиентов, поэтому есть
 // два пути:
-//  1) вход по логину/паролю (работает, если IP не вызывает проверку);
-//  2) импорт cookie из обычного браузера: приложение открывает страницу входа,
+//  1. вход по логину/паролю (работает, если IP не вызывает проверку);
+//  2. импорт cookie из обычного браузера: приложение открывает страницу входа,
 //     пользователь входит и копирует cookie в буфер обмена.
 func cmdLogin(ctx context.Context) error {
 	a, err := newApp()
@@ -435,7 +625,19 @@ func cmdCheck(ctx context.Context) error {
 	} else {
 		fmt.Printf("поиск:              ок, найдено %d\n", len(topics))
 	}
+	fmt.Printf("браузер:            %s\n", browserStatus(a))
 	return nil
+}
+
+// browserStatus описывает состояние скрытого браузера (для check).
+func browserStatus(a *app) string {
+	if a.browserReady() {
+		return "скрытый (headless), запущен"
+	}
+	if os.Getenv("RUTSTREAM_NO_BROWSER") != "" {
+		return "отключён (RUTSTREAM_NO_BROWSER)"
+	}
+	return "не понадобился — сайт отвечает напрямую"
 }
 
 // ---------------------------------------------------------------- команды --
@@ -891,8 +1093,6 @@ func allFileIndexes(info *metainfo.Info) []int {
 	}
 	return out
 }
-
-
 
 func cmdHistory(ctx context.Context) error {
 	a, err := newApp()

@@ -14,7 +14,20 @@
     <button type="submit">Найти</button>
   </form>
   <div id="status" class="status"></div>
+  <button id="session-btn" class="btn-diag" title="Вставить cookie сессии rutracker">Сессия</button>
+  <button id="help" class="btn-diag" title="Как начать пользоваться">Как начать</button>
 </header>
+
+<div id="session-bar" class="session-bar" hidden>
+  <span class="session-label">Cookie rutracker:</span>
+  <textarea id="session-input" rows="2" spellcheck="false"
+    placeholder="Вставьте всю строку document.cookie: bb_session=…; cf_clearance=…"></textarea>
+  <div class="session-actions">
+    <button id="session-save">Сохранить</button>
+    <button id="session-clear" class="btn-quiet">Сбросить</button>
+  </div>
+  <span id="session-msg" class="session-msg"></span>
+</div>
 
 <main class="cols">
   <section class="col col-left">
@@ -68,6 +81,48 @@
     <div id="history" class="list meta">—</div>
   </section>
 </main>
+
+<div id="help-modal" class="modal" hidden>
+  <div class="modal-box">
+    <h2>Как начать пользоваться</h2>
+    <div class="help">
+      <ol>
+        <li><b>Войдите на rutracker.org</b> в обычном браузере — приложение
+            работает с вашей сессией, а не хранит пароль.</li>
+        <li><b>Скопируйте cookie.</b> Нажмите F12 → вкладка <code>Console</code>,
+            введите <code>document.cookie</code> и нажмите Enter. Появится строка
+            вида <code>bb_session=…; cf_clearance=…</code>. Скопируйте её целиком
+            (не только значение после <code>bb_session=</code>).</li>
+        <li><b>Нажмите «Сессия»</b> вверху и вставьте строку в поле. «Сохранить».
+            Cookie хранится только на вашем компьютере, в каталоге данных
+            приложения, и никуда не отправляется.</li>
+        <li><b>Найдите музыку:</b> введите исполнителя или альбом в поиск либо
+            выберите раздел слева. У раздач видны качество, размер и число сидов.</li>
+        <li><b>▶ — слушать.</b> Скачивается только выбранный трек, а не вся
+            раздача. <b>⬇ — скачать</b> трек на диск
+            (<code>%APPDATA%\RutStream\data</code>).</li>
+        <li><b>Раздача и рейтинг.</b> В правой колонке показано, сколько отдано
+            и каков рейтинг. Чтобы не уйти в минус, приложение предупреждает,
+            если рейтинг опускается ниже <code>0.5</code>
+            (настраивается переменной <code>RUTSTREAM_MIN_RATIO</code>).</li>
+      </ol>
+      <p class="help-note">
+        <b>Окно браузера при работе не открывается.</b> Если rutracker просит
+        пройти проверку Cloudflare, приложение незаметно запускает скрытый
+        headless-браузер (Edge) — без окна и без значка в панели задач. Обычно
+        достаточно один раз вставить cookie.
+      </p>
+      <p class="help-note">
+        Не удаётся войти? Проверьте, что строка скопирована целиком и что вы
+        всё ещё авторизованы на rutracker.org в браузере. Диагностика:
+        <code>rutstream.exe check</code>.
+      </p>
+    </div>
+    <div class="modal-act">
+      <button id="help-close">Понятно</button>
+    </div>
+  </div>
+</div>
 
 <script src="/app.js"></script>
 </body>

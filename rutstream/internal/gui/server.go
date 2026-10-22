@@ -38,6 +38,12 @@ type Options struct {
 	Store   *catalog.Store
 	DataDir string
 	Logger  *slog.Logger
+	// BrowserReady — сообщает, доступен ли браузерный транспорт.
+	BrowserReady func() bool
+	// SaveSession — сохраняет cookie сессии (ввод из интерфейса).
+	SaveSession func(cookie string) error
+	// ClearSession — удаляет сохранённую сессию.
+	ClearSession func()
 	// FetchTorrent — загрузка .torrent по id темы (по умолчанию — клиент).
 	FetchTorrent func(ctx context.Context, topicID int64) (*metainfo.MetaInfo, error)
 }
@@ -160,6 +166,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiSimilar(w, r)
 	case "history":
 		s.apiHistory(w, r)
+	case "session":
+		s.apiSession(w, r)
 	case "plan":
 		s.apiPlan(w, r)
 	case "play":
@@ -179,6 +187,49 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 func writeErr(w http.ResponseWriter, err error) {
 	writeJSON(w, map[string]string{"error": err.Error()})
+}
+
+// apiSession — ввод и сохранение cookie сессии rutracker.
+//
+// Пользователю не нужно ни разбираться с переменными окружения, ни лезть
+// в DevTools за DevTools-инструментами: значение bb_session вставляется прямо
+// в окно приложения, сохраняется в файл сессии и применяется немедленно.
+func (s *Server) apiSession(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Cookie string `json:"cookie"`
+		// Clear — очистить сохранённую сессию.
+		Clear bool `json:"clear"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if req.Clear {
+		s.opts.ClearSession()
+		writeJSON(w, map[string]any{"ok": true, "loggedIn": false})
+		return
+	}
+	text := strings.TrimSpace(req.Cookie)
+	// Принимаем и голое значение bb_session, и всю строку document.cookie —
+	// во втором случае сохраняется ещё и cf_clearance.
+	set := rutracker.ExtractCookieSet(text)
+	session := set["bb_session"]
+	if session == "" {
+		session = rutracker.ExtractSessionCookie(text)
+	}
+	if session == "" {
+		writeErr(w, fmt.Errorf("в строке нет cookie bb_session — скопируйте всю строку document.cookie"))
+		return
+	}
+	if err := s.opts.SaveSession(text); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"ok":           true,
+		"loggedIn":     true,
+		"hasClearance": set["cf_clearance"] != "",
+	})
 }
 
 // apiState — общее состояние приложения.
@@ -507,16 +558,16 @@ func (s *Server) apiPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	s.saveTracks(ctx, id, ix, topicArtist, topicAlbum)
 	type Track struct {
-		No        int     `json:"no"`
-		Title     string  `json:"title"`
-		Duration  float64 `json:"duration"`
-		Size      int64   `json:"size"`
-		Download  int64   `json:"download"`
-		Extra     int64   `json:"extra"`
-		Codec     string  `json:"codec"`
-		Lossless  bool    `json:"lossless"`
-		Source    string  `json:"source"`
-		Position  string  `json:"position"`
+		No       int     `json:"no"`
+		Title    string  `json:"title"`
+		Duration float64 `json:"duration"`
+		Size     int64   `json:"size"`
+		Download int64   `json:"download"`
+		Extra    int64   `json:"extra"`
+		Codec    string  `json:"codec"`
+		Lossless bool    `json:"lossless"`
+		Source   string  `json:"source"`
+		Position string  `json:"position"`
 	}
 	tracks := make([]Track, 0, len(ix.Tracks))
 	for i, t := range ix.Tracks {

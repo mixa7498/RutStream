@@ -73,6 +73,18 @@ func (c *Client) SetCookieSet(cookies map[string]string) {
 	c.jar.SetCookies(u, list)
 }
 
+// Cookies возвращает cookie текущей сессии (для переноса в скрытый браузер).
+//
+// Путь /forum/ берём намеренно: bb_session выдаётся именно на него, а
+// cf_clearance — на весь домен. Так в выборку попадают обе.
+func (c *Client) Cookies() []*http.Cookie {
+	u, err := url.Parse(c.mirror + "/forum/")
+	if err != nil {
+		return nil
+	}
+	return c.jar.Cookies(u)
+}
+
 // HasClearance сообщает, есть ли среди cookie Cloudflare-разрешение.
 func (c *Client) HasClearance() bool {
 	u, _ := url.Parse(c.mirror)

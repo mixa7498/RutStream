@@ -5,6 +5,10 @@
 **Код:** `C:\Users\mixa7\Documents\RutStream\rutstream` (модуль Go)
 **Документы:** `ТЗ_Rutracker_Music_Streamer.md`, `ТЗ_RutStream_Lite_без_P2P.md`, `BUILD.md`
 
+> **Исторический документ.** Актуальная сборка и публикация описаны в
+> [BUILD.md](BUILD.md): PowerShell-скрипты удалены, приложение собирается
+> одной командой `./build.sh` (или `make sign`) в один самодостаточный exe.
+
 ---
 
 ## 1. Все пять гипотез закрыты на реальных данных

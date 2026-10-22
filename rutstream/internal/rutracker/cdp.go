@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -357,65 +355,6 @@ func (c *Client) ImportCookiesTo(cookies []*BrowserCookie) int {
 
 // DefaultCDPPort — порт отладки, который мы просим открыть у пользователя.
 const DefaultCDPPort = 9222
-
-// OpenBrowserWithProfile запускает браузер с отладкой и отдельным профилем.
-//
-// Отдельный профиль нужен, потому что обычный Edge, уже открытый пользователем,
-// порт отладки не принимает. В своём профиле приложение работает
-// автономно: пользователь один раз проходит проверку Cloudflare (или входит
-// в аккаунт), дальше cookie живут в профиле приложения.
-func OpenBrowserWithProfile(port int, profileDir string) error {
-	bin := ""
-	for _, p := range []string{
-		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
-		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
-		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
-		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
-	} {
-		if _, err := os.Stat(p); err == nil {
-			bin = p
-			break
-		}
-	}
-	if bin == "" {
-		return fmt.Errorf("не найден Edge или Chrome")
-	}
-	if err := os.MkdirAll(profileDir, 0o755); err != nil {
-		return err
-	}
-	// Запускаем напрямую: в cmd /c start путь с пробелами («Program Files (x86)»)
-	// ломается, а отдельная группа процессов не нужна — браузер и так
-	// переживёт завершение приложения.
-	cmd := exec.Command(bin,
-		fmt.Sprintf("--remote-debugging-port=%d", port),
-		fmt.Sprintf("--user-data-dir=%s", profileDir),
-		"--no-first-run",
-		"--no-default-browser-check",
-	)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Start()
-}
-
-// OpenBrowserWithDebugging запускает браузер с включённой отладкой.
-func OpenBrowserWithDebugging() error {
-	bin := ""
-	for _, p := range []string{
-		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
-		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
-		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
-	} {
-		if _, err := os.Stat(p); err == nil {
-			bin = p
-			break
-		}
-	}
-	if bin == "" {
-		return fmt.Errorf("не найден Edge или Chrome")
-	}
-	cmd := fmt.Sprintf(`"%s" --remote-debugging-port=%d`, bin, DefaultCDPPort)
-	return exec.Command("cmd", "/c", "start", "", cmd).Start()
-}
 
 // PortFromArg извлекает номер порта из аргумента.
 func PortFromArg(s string) int {

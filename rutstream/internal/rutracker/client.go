@@ -43,6 +43,10 @@ type Options struct {
 	Logger Logger
 	// UserAgent.
 	UserAgent string
+	// EnsureTransport — вызывается при первом Cloudflare-challenge, чтобы
+	// подготовить резервный транспорт (скрытый браузер). Возвращённый
+	// транспорт запоминается.
+	EnsureTransport func(ctx context.Context) (Transport, error)
 }
 
 // Logger — минимальный интерфейс логирования.
@@ -57,12 +61,12 @@ type Client struct {
 	jar    *cookiejar.Jar
 	mirror string
 
-	mu       sync.Mutex
+	mu        sync.Mutex
 	transport Transport
 
 	// subMu/subIDs — кэш подразделов форумов (id подразделов по id раздела).
-	subMu   sync.Mutex
-	subIDs  map[int64][]int64
+	subMu  sync.Mutex
+	subIDs map[int64][]int64
 
 	// musicMu/musicIDs — готовый набор id музыкальных разделов с подразделами
 	// (задаётся снаружи, чтобы не обходить форум повторно).
@@ -191,8 +195,22 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values) (
 }
 
 // doViaTransport повторяет запрос через браузерный транспорт.
+//
+// Если транспорт ещё не подготовлен, запускаем его на месте: скрытый браузер
+// поднимается только при первом challenge — пока сайт отвечает напрямую,
+// никакого браузера в памяти нет.
 func (c *Client) doViaTransport(ctx context.Context, method, path string, form url.Values) ([]byte, error) {
 	t := c.Transport()
+	if t == nil && c.opts.EnsureTransport != nil {
+		var err error
+		t, err = c.opts.EnsureTransport(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("%w: не удалось запустить скрытый браузер: %v", ErrChallenge, err)
+		}
+		if t != nil {
+			c.SetTransport(t)
+		}
+	}
 	if t == nil {
 		return nil, ErrChallenge
 	}
