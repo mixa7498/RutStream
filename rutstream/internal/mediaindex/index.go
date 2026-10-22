@@ -1,12 +1,14 @@
 package mediaindex
 
 import (
+	"bytes"
 	"fmt"
 	"path"
 	"sort"
 	"strings"
 
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/mixa7/rutstream/internal/mediaindex/sniff"
 )
 
 // Source — откуда взялась информация о треке.
@@ -66,6 +68,10 @@ type Hints struct {
 	// ReaderFor даёт доступ к содержимому файла раздачи (для sniff-а).
 	// Возвращает nil, если содержимое недоступно.
 	ReaderFor func(fileIdx int) (ReaderAt, error)
+	// CueReader возвращает содержимое cue-файла раздачи (если он есть).
+	// Используется для раздач вида «FLAC (image+.cue)», где треки альбома
+	// лежат внутри одного большого файла.
+	CueReader func() ([]byte, error)
 }
 
 // ReaderAt — минимальный интерфейс чтения (совместим с io.ReaderAt).
@@ -81,6 +87,8 @@ type Index struct {
 	// SingleFileHasAudio означает, что в раздаче ровно один аудиофайл
 	// (типичный случай «дискография одним файлом»).
 	SingleFileHasAudio bool
+	// Diag — диагностика разбора (почему не удалось определить треки).
+	Diag string
 }
 
 // AudioFileIndexes возвращает индексы аудиофайлов раздачи.
@@ -208,6 +216,51 @@ func buildMultiFile(ix *Index, audio []int, hints Hints) error {
 	return nil
 }
 
+// cueTracks ищет cue-файл раздачи и возвращает треки альбома с байтовыми границами.
+//
+// Раздачи вида «FLAC (image+.cue)» содержат один большой FLAC на альбом плюс
+// cue-файл с разметкой. Cue-файл лежит рядом, поэтому треки внутри FLAC
+// получают точные byte-range — их можно качать выборочно.
+func (ix *Index) cueTracks(fileIdx int, res *sniff.Result, hints Hints) []CueTrack {
+	if res == nil || res.Format != "flac" || hints.CueReader == nil {
+		return nil
+	}
+	raw, err := hints.CueReader()
+	if err != nil {
+		ix.Diag = "чтение cue: " + err.Error()
+		return nil
+	}
+	if len(raw) == 0 {
+		ix.Diag = "cue-файл не найден в раздаче"
+		return nil
+	}
+	sheet, err := ParseCue(bytes.NewReader(raw))
+	if err != nil {
+		ix.Diag = "разбор cue: " + err.Error()
+		return nil
+	}
+	if sheet == nil {
+		return nil
+	}
+	audioName := FilePath(ix.Files[fileIdx])
+	tracks := sheet.CueTracksForFile(audioName)
+	if len(tracks) == 0 {
+		ix.Diag = "в cue нет треков для " + audioName
+		return nil
+	}
+	// Переводим сэмплы в байты аудиоданных.
+	channels := res.Channels
+	if channels <= 0 {
+		channels = 2
+	}
+	bits := res.BitDepth
+	if bits <= 0 {
+		bits = 16
+	}
+	audioBytes := ix.Files[fileIdx].Length
+	return sheet.TrackBytes(tracks, channels, bits, audioBytes)
+}
+
 // matchSiteTrack ищет соответствующий трек в треклисте сайта.
 func matchSiteTrack(tp TrackPlan, site []SiteTrack) (SiteTrack, bool) {
 	if len(site) == 0 {
@@ -261,7 +314,11 @@ func buildSingleFile(ix *Index, fileIdx int, hints Hints) error {
 
 	// Пробуем разобрать контейнер — получим границы треков внутри файла.
 	if hints.ReaderFor != nil {
-		if res, err := sniffContainer(hints.ReaderFor, fileIdx, ix.Files[fileIdx].Length); err == nil && res != nil {
+		res, serr := sniffContainer(hints.ReaderFor, fileIdx, ix.Files[fileIdx].Length)
+		if serr != nil {
+			ix.Diag = "разбор контейнера: " + serr.Error()
+		}
+		if res != nil {
 			tp.Codec = res.Codec
 			tp.Lossless = res.Lossless
 			tp.SampleRate = res.SampleRate
@@ -269,6 +326,31 @@ func buildSingleFile(ix *Index, fileIdx int, hints Hints) error {
 			tp.BitrateKbps = res.BitrateKbps
 			if res.DurationSec > 0 {
 				tp.DurationSec = res.DurationSec
+			}
+			// Альбом внутри одного файла: границы треков даёт cue-файл раздачи.
+			if tracks := ix.cueTracks(fileIdx, res, hints); len(tracks) > 1 {
+				ix.Tracks = nil
+				for _, ct := range tracks {
+					if ct.End <= ct.Index {
+						// Пустой трек (разметка не покрывает файл) — пропускаем.
+						continue
+					}
+					sub := tp
+					sub.ID = fmt.Sprintf("%s:%d", full, ct.Number)
+					sub.Title = ct.Title
+					sub.Pos = ct.Number
+					sub.ByteStart = plan.ByteStart + ct.Index
+					sub.ByteEnd = plan.ByteStart + ct.End
+					sub.DurationSec = float64(ct.End-ct.Index) / float64(res.SampleRate*res.Channels*res.BitDepth/8)
+					sub.Source = SourceCue
+					sub.Confidence = 0.9
+					pr := PieceRangeFor(sub.ByteStart, sub.ByteEnd, ix.Info.PieceLength)
+					sub.PieceStart = pr.Start
+					sub.PieceEnd = pr.End
+					sub.ExtraBytes = ExtraBytes(sub.ByteStart, sub.ByteEnd, ix.Info.PieceLength)
+					ix.Tracks = append(ix.Tracks, sub)
+				}
+				return nil
 			}
 			if res.Format == "zip" && len(res.Tracks) > 0 {
 				// Архив с отдельными треками: границы берём из записей ZIP.

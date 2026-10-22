@@ -379,6 +379,34 @@ func (l *limitedFileReader) Close() error {
 	return nil
 }
 
+// ReadAt читает данные по произвольному смещению (совместимость с io.ReaderAt).
+//
+// Нужен sniffer'ам: они читают заголовок контейнера по смещению, не трогая
+// позицию потока. Чтение по смещению поднимает приоритет нужного piece'а —
+// то есть sniffer сам инициирует докачку заголовка.
+func (l *limitedFileReader) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, fmt.Errorf("negative offset %d", off)
+	}
+	if off >= l.length {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > l.length-off {
+		p = p[:l.length-off]
+	}
+	// Сохраняем позицию: ReadAt не должен её менять.
+	saved := l.pos
+	if _, err := l.Seek(off, io.SeekStart); err != nil {
+		return 0, err
+	}
+	n, err := l.r.Read(p)
+	l.pos = saved
+	if err == nil && n < len(p) {
+		err = io.ErrUnexpectedEOF
+	}
+	return n, err
+}
+
 // WaitPiece дожидается готовности piece'а.
 func (s *Session) WaitPiece(ctx context.Context, idx int) error {
 	for {

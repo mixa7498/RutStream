@@ -400,6 +400,21 @@ func (c *CDP) CurrentLocation() (string, error) {
 	return c.evaluate(conn, "location.href")
 }
 
+// EnsureTab открывает вкладку, если её ещё нет.
+//
+// Нужно перед Network.setCookie: cookie ставится в контексте вкладки,
+// поэтому без вкладки вызов молча не срабатывает.
+func (c *CDP) EnsureTab(rawURL string) error {
+	c.mu.Lock()
+	has := c.conn != nil
+	c.mu.Unlock()
+	if has {
+		return nil
+	}
+	_, err := c.Fetch(rawURL, 45*time.Second)
+	return err
+}
+
 // SetCookie устанавливает cookie в браузере.
 //
 // Это нужно, чтобы браузер был авторизован на форуме: сессия rutracker

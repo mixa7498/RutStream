@@ -185,14 +185,21 @@ func (a *app) attachBrowser() {
 	// открывались авторизованными (Cloudflare пропускает браузер, но не наш
 	// HTTP-клиент, поэтому ходим через него).
 	if session := a.client.SessionCookie(); session != "" {
-		_ = cdp.SetCookie(&rutracker.BrowserCookie{
-			Name:     "bb_session",
-			Value:    session,
-			Domain:   "rutracker.org",
-			Path:     "/forum/",
-			HTTPOnly: true,
-			Secure:   true,
-		})
+		// Cookie ставится в контексте вкладки — сначала открываем её.
+		if err := cdp.EnsureTab(a.client.Mirror() + "/forum/index.php"); err == nil {
+			if err := cdp.SetCookie(&rutracker.BrowserCookie{
+				Name:     "bb_session",
+				Value:    session,
+				Domain:   "rutracker.org",
+				Path:     "/forum/",
+				HTTPOnly: true,
+				Secure:   true,
+			}); err != nil {
+				fmt.Fprintln(os.Stderr, "предупреждение: не удалось передать cookie в браузер:", err)
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "предупреждение: не удалось открыть вкладку браузера:", err)
+		}
 	}
 }
 
@@ -546,18 +553,36 @@ func cmdPlan(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ix, err := mediaindex.Build(info, mediaindex.Hints{})
+	// Индекс строим с доступом к содержимому раздачи: у однофайловых
+	// релизов («FLAC (image+.cue)») список треков даёт cue-файл, а не имя файла.
+	session, err := a.engine.Start(ctx, mi, torrent.StartOptions{Trackers: trackersOf(mi)})
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx)
 	if err != nil {
 		return err
 	}
 	total := info.TotalLength()
-	fmt.Printf("Раздача: %s | piece %s | piece'ов %d | файлов %d\n\n",
-		human(total), human(info.PieceLength), info.NumPieces(), len(ix.Files))
+	fmt.Printf("Раздача: %s | piece %s | piece'ов %d | файлов %d | треков %d\n\n",
+		human(total), human(info.PieceLength), info.NumPieces(), len(ix.Files), len(ix.Tracks))
+	if len(ix.Tracks) <= 1 && len(ix.Files) > 1 {
+		fmt.Println("Файлы раздачи:")
+		for i, f := range ix.Files {
+			if i >= 20 {
+				fmt.Printf("  … ещё %d\n", len(ix.Files)-i)
+				break
+			}
+			fmt.Printf("  %-70s %s\n", mediaindex.FilePath(f), human(f.Length))
+		}
+		fmt.Println()
+	}
 	fmt.Printf("%-4s %-10s %-11s %-9s %-8s %s\n", "№", "размер", "скачаем", "лишние", "кодек", "файл")
 	for i, t := range ix.Tracks {
-		bytes, _, extra, _ := mediaindex.EstimateDownload(info, t.FileIdx)
+		bytes, _, extra := mediaindex.EstimateTrack(info, t)
 		fmt.Printf("%-4d %-10s %-11s %-9s %-8s %s\n",
-			i+1, human(t.ByteEnd-t.ByteStart), human(bytes), human(extra), t.Codec, t.Path)
+			i+1, human(t.ByteEnd-t.ByteStart), human(bytes), human(extra), t.Codec, t.Title)
 		if i >= 30 {
 			fmt.Printf("… ещё %d треков\n", len(ix.Tracks)-i-1)
 			break
@@ -584,18 +609,6 @@ func cmdPlay(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ix, err := mediaindex.Build(info, mediaindex.Hints{})
-	if err != nil {
-		return err
-	}
-	if trackNo < 1 || trackNo > len(ix.Tracks) {
-		return fmt.Errorf("трек №%d вне диапазона (1..%d)", trackNo, len(ix.Tracks))
-	}
-	track := ix.Tracks[trackNo-1]
-	bytes, _, extra, _ := mediaindex.EstimateDownload(info, track.FileIdx)
-	fmt.Printf("Трек: %s\n", track.Path)
-	fmt.Printf("Скачаем %s (из раздачи %s), лишних байт: %s\n",
-		human(bytes), human(info.TotalLength()), human(extra))
 
 	session, err := a.engine.Start(ctx, mi, torrent.StartOptions{
 		Trackers: trackersOf(mi),
@@ -604,6 +617,25 @@ func cmdPlay(ctx context.Context, args []string) error {
 		return err
 	}
 	defer session.Close()
+
+	// Индекс строим с доступом к содержимому раздачи: для однофайловых
+	// релизов («FLAC (image+.cue)», «альбом одним .zip») список треков
+	// известен только из самого файла.
+	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx)
+	if err != nil {
+		return err
+	}
+	if len(ix.Tracks) == 0 {
+		return fmt.Errorf("в раздаче не найдено ни одного трека")
+	}
+	if trackNo < 1 || trackNo > len(ix.Tracks) {
+		return fmt.Errorf("трек №%d вне диапазона (1..%d)", trackNo, len(ix.Tracks))
+	}
+	track := ix.Tracks[trackNo-1]
+	bytes, _, extra := mediaindex.EstimateTrack(info, track)
+	fmt.Printf("Трек: %s\n", track.Path)
+	fmt.Printf("Скачаем %s (из раздачи %s), лишних байт: %s\n",
+		human(bytes), human(info.TotalLength()), human(extra))
 
 	player := playback.New(session)
 	wav := filepath.Join(a.dataDir, "preview.wav")

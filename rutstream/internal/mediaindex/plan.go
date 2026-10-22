@@ -176,6 +176,21 @@ func EstimateDownload(info *metainfo.Info, idx int) (bytes, pieces int64, extra 
 	return bytes, pieces, extra, nil
 }
 
+// EstimateTrack оценивает объём загрузки конкретного трека.
+//
+// Для трека внутри одного файла (альбом с cue-разметкой) считаем по границам
+// трека, а не по границам файла: скачивается только нужный кусок альбома.
+func EstimateTrack(info *metainfo.Info, t TrackPlan) (bytes, pieces int64, extra int64) {
+	if info == nil || t.ByteEnd <= t.ByteStart {
+		return 0, 0, 0
+	}
+	pr := PieceRangeFor(t.ByteStart, t.ByteEnd, info.PieceLength)
+	bytes = int64(pr.Len()) * info.PieceLength
+	pieces = int64(pr.Len())
+	extra = ExtraBytes(t.ByteStart, t.ByteEnd, info.PieceLength)
+	return bytes, pieces, extra
+}
+
 // PieceLength возвращает длину piece'а раздачи.
 func PieceLength(info *metainfo.Info) int64 {
 	if info == nil {
