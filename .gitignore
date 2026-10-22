@@ -1,6 +1,9 @@
 ﻿# Собранные бинарники и временные файлы
 rutstream/bin/
+release/
 *.exe
+*.exe.sha256
+*.cer
 *.test
 *.wav
 *.mp3
