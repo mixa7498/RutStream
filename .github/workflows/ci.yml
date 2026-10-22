@@ -26,6 +26,7 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: true
+          cache-dependency-path: rutstream/go.sum
 
       - name: Сборка
         working-directory: rutstream
@@ -47,6 +48,7 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: true
+          cache-dependency-path: rutstream/go.sum
       - name: go vet
         working-directory: rutstream
         run: go vet -tags nodevice ./...
@@ -59,14 +61,16 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: true
+          cache-dependency-path: rutstream/go.sum
       - name: Сборка одного exe (без консоли)
         working-directory: rutstream
         run: go build -ldflags "-s -w -H windowsgui -X main.version=ci" -o bin\rutstream.exe ./cmd/rutstream
       - name: Приложение запускается
         shell: pwsh
+        working-directory: rutstream
         run: |
-          .\bin\rutstream.exe --help
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $p = Start-Process -FilePath .\bin\rutstream.exe -ArgumentList '--help' -NoNewWindow -Wait -PassThru
+          if ($p.ExitCode -ne 0) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: rutstream-windows
