@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Сборка
+        working-directory: rutstream
+        run: go build -tags nodevice -ldflags "-s -w" -o /dev/null ./...
+
+      - name: Тесты
+        working-directory: rutstream
+        run: go test -count=1 ./...
+
+      - name: Тесты с проверкой гонок
+        working-directory: rutstream
+        run: go test -race -count=1 ./...
+
+  vet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: go vet
+        working-directory: rutstream
+        run: go vet ./...
+
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: Сборка приложения с окном
+        working-directory: rutstream
+        run: go build -ldflags "-s -w" -o bin\rutstream.exe ./cmd/rutstream
+      - name: Приложение запускается
+        shell: pwsh
+        run: |
+          .\bin\rutstream.exe --help
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rutstream-windows
+          path: rutstream/bin/rutstream.exe
+          if-no-files-found: error

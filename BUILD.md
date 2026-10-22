@@ -119,15 +119,90 @@ Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy" |
    до CA из программы Microsoft Trusted Root.
 3. Проверять и тестировать в среде без этой политики (WSL/CI).
 
-Самоподпись (полезна для «доверенного» запуска в профиле пользователя, но не для SAC):
+### 6.1. Подпись приложения
+
+Готовый скрипт: `tools\sign.ps1`.
+
 ```powershell
-$cert = New-SelfSignedCertificate -Subject "CN=RutStream" -Type CodeSigningCert `
-        -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable
-certutil -user -addstore Root "$env:TEMP\rutstream.cer"
-Set-AuthenticodeSignature -FilePath bin\rutstream.exe -Certificate $cert -HashAlgorithm SHA256
+# самоподписанный сертификат (снимает «неизвестный издатель» там,
+# где сертификат установлен в «Доверенные корневые центры»)
+powershell -ExecutionPolicy Bypass -File tools\sign.ps1 -Exe rutstream\bin\rutstream.exe -Create
+
+# свой сертификат публичного CA
+powershell -ExecutionPolicy Bypass -File tools\sign.ps1 -Exe rutstream\bin\rutstream.exe -PfxPath cert.pfx
 ```
 
-## 7. Проверочный стенд (Phase 0)
+Скрипт создаёт (или импортирует) сертификат, подписывает EXE с меткой времени
+(DigiCert) и выкладывает рядом `rutstream-cert.cer` — его нужно установить на
+других машинах:
+
+```powershell
+# от администратора
+Import-Certificate -FilePath rutstream-cert.cer -CertStoreLocation Cert:\LocalMachine\Root
+Import-Certificate -FilePath rutstream-cert.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
+```
+
+Проверка:
+```powershell
+Get-AuthenticodeSignature rutstream\bin\rutstream.exe | Format-List Status,SignerCertificate
+```
+
+### 6.2. Где взять сертификат публичного CA
+
+| Вариант | Цена | Нюансы |
+|---|---|---|
+| Microsoft Trusted Signing (Azure Code Signing) | от ~$10/мес | проверка личности **организации**; физлицу в РФ практически недоступно |
+| Sectigo / Certum code signing (DV) | от ~$70/год | нужна проверка личности (для физлица — по паспорту) |
+| DigiCert / GlobalSign (OV, EV) | от ~$200/год | то же + дороже |
+| **Без подписи, GitHub Releases + SHA-256** | бесплатно | так распространяют ManyGUI, PortableApps и др.: пользователь сверяет хеш |
+
+Для open-source проекта практичнее последний вариант: в релиз кладутся EXE и
+файл с SHA-256, в README — команда проверки. Пользователь запускает файл,
+сверяет хеш и при желании сам ставит сертификат из `rutstream-cert.cer`.
+
+### 6.3. Браузер с отладкой
+
+Cloudflare проверяет TLS-отпечаток клиента, поэтому запросы к сайту идут
+**из браузера пользователя** по протоколу Chrome DevTools.
+
+* Приложение **запускает браузер само** (Edge/Chrome с отдельным профилем
+  в `%APPDATA%\RutStream\browser`), если тот ещё не запущен с отладкой.
+* Если браузер уже открыт обычным образом, он не примет порт отладки —
+  закройте его и запустите приложение снова.
+* Один раз пройдите в окне браузера проверку Cloudflare — дальше cookie
+  живут в профиле приложения.
+
+## 7. Публикация на GitHub
+
+Скрипт `tools\publish.ps1` делает всё: создаёт репозиторий, отправляет ветку и
+теги, собирает и подписывает EXE, создаёт релиз с файлом SHA-256.
+
+```powershell
+# один раз: авторизация GitHub CLI (откроется браузер)
+gh auth login --web
+
+# публикация
+powershell -ExecutionPolicy Bypass -File tools\publish.ps1 -Name RutStream -Visibility public -Version v0.1.0
+```
+
+Что делает скрипт:
+
+1. `gh repo create` — репозиторий с текущей веткой как `origin` (или добавляет
+   remote, если репозиторий уже создан).
+2. `git push` — ветка и тег версии.
+3. `go build -ldflags "-s -w"` — сборка EXE.
+4. `tools\sign.ps1` — подпись сертификатом.
+5. `gh release create` — релиз с EXE и `rutstream.exe.sha256`.
+
+Пользователю остаётся сверить хеш:
+
+```powershell
+(Get-FileHash -Algorithm SHA256 rutstream.exe).Hash.ToLower()
+```
+
+и сверить его с содержимым `rutstream.exe.sha256` из релиза.
+
+## 8. Проверочный стенд (Phase 0)
 
 ```powershell
 .\bin\spike.exe local           # H4: из раздачи 24 МБ скачивается только нужный файл (~2 МБ)
