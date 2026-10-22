@@ -55,6 +55,10 @@ func main() {
 		err = cmdPlay(ctx, os.Args[2:])
 	case "download":
 		err = cmdDownload(ctx, os.Args[2:])
+	case "gui":
+		err = cmdGUI(ctx, os.Args[2:])
+	case "raw":
+		err = cmdRaw(ctx, os.Args[2:])
 	case "history":
 		err = cmdHistory(ctx)
 	case "login":
@@ -86,6 +90,7 @@ func usage() {
   rutstream play <topicID> <трек>       потоковое воспроизведение (1 — первый трек)
   rutstream download <topicID> <трек>   скачать трек целиком
   rutstream history                     история прослушиваний
+  rutstream gui                         приложение с окном (разделы, поиск, плеер)
 
 Переменные окружения:
   RUTSTREAM_USER / RUTSTREAM_PASS  логин и пароль rutracker
@@ -527,6 +532,11 @@ func cmdShow(ctx context.Context, args []string) error {
 	fmt.Printf("трекеры: %s\n", strings.Join(topic.Trackers, ", "))
 	fmt.Printf("исполнитель: %s | альбом: %s | год: %s\n", topic.Artist, topic.Album, topic.Year)
 	fmt.Printf("жанр: %s | формат: %s | битрейт: %s\n", topic.Genre, topic.Format, topic.Bitrate)
+	size := topic.SizeText
+	if size == "" && topic.Size > 0 {
+		size = human(topic.Size)
+	}
+	fmt.Printf("размер: %s | сидов: %d | личеров: %d\n", size, topic.Seeds, topic.Peers)
 	fmt.Printf("треков в треклисте: %d\n", len(topic.Tracks))
 	for _, t := range topic.Tracks {
 		fmt.Printf("  %2d. %-55s %s\n", t.Pos, t.Title, dur(t.Duration))
@@ -668,6 +678,33 @@ func cmdPlay(ctx context.Context, args []string) error {
 	// В режиме RAM освобождаем память под скачанные piece'ы.
 	player.ReleaseTrack(playback.Track{FileIdx: track.FileIdx}, info)
 	fmt.Printf("память под piece'ы: %s\n", human(a.engine.MemoryUsed()))
+	return nil
+}
+
+// cmdRaw отдаёт сырой HTML страницы (для отладки парсеров).
+//
+// Использование: rutstream raw /forum/viewtopic.php?t=6917156 [файл]
+func cmdRaw(ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("нужен путь страницы, например /forum/index.php")
+	}
+	a, err := newApp()
+	if err != nil {
+		return err
+	}
+	defer a.close()
+	data, err := a.client.Get(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	if len(args) > 1 {
+		if err := os.WriteFile(args[1], data, 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("сохранено: %s (%d байт)\n", args[1], len(data))
+		return nil
+	}
+	os.Stdout.Write(data)
 	return nil
 }
 

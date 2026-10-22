@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RutStream</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">RutStream</div>
+  <form id="search-form" class="search">
+    <input id="search-input" type="search" placeholder="Поиск по rutracker: исполнитель, альбом…" autocomplete="off">
+    <button type="submit">Найти</button>
+  </form>
+  <div id="status" class="status"></div>
+</header>
+
+<main class="cols">
+  <section class="col col-left">
+    <h2>Разделы</h2>
+    <div id="sections" class="list">Загрузка…</div>
+  </section>
+
+  <section class="col col-results">
+    <div id="results-head" class="results-head">Введите запрос или выберите раздел</div>
+    <div id="results" class="list"></div>
+  </section>
+
+  <section class="col col-tracks">
+    <div id="tracks-head" class="results-head" hidden>Треклист</div>
+    <div id="tracks" class="list" hidden></div>
+  </section>
+
+  <section class="col col-right">
+    <h2>Плеер</h2>
+    <div id="player" class="player">
+      <div class="player-title">Ничего не играет</div>
+      <div class="player-meta"></div>
+      <div class="bar"><div class="bar-fill"></div></div>
+      <button id="stop" class="btn-stop" disabled>Стоп</button>
+    </div>
+
+    <h2>Загрузки</h2>
+    <div id="downloads" class="list">Очередь пуста</div>
+
+    <h2>Раздача</h2>
+    <div id="release" class="meta">—</div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

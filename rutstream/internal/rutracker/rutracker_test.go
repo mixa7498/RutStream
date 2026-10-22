@@ -25,7 +25,14 @@ const topicFixture = `<!DOCTYPE html><html><body>
 <tr><td>2</td><td>Séga É Zilwa</td><td>3:45</td></tr>
 <tr><td>3</td><td>Third Track Name</td><td>5:00</td></tr>
 </table>
-</div></body></html>`
+</div>
+<table class="mod-text"><tr><td>Статистика раздачи</td></tr>
+<tr><td class="borderless bCenter pad_8">Размер:&nbsp; <b>960.8&nbsp;MB</b></td></tr>
+<tr><td class="row5 pad_2 tCenter"><div class="mrg_4 pad_4">
+<span class="seed">Сиды:&nbsp; <b>90</b></span> &nbsp; <span class="leech">Личи:&nbsp; <b>34</b></span>
+</div></td></tr></table>
+<ul class="inlined middot-separated"><li><span id="tor-size-humn" title="1007486418">960.81 МБ</span></li></ul>
+</body></html>`
 
 func TestParseTopic(t *testing.T) {
 	topic, err := ParseTopic([]byte(topicFixture))
@@ -49,6 +56,16 @@ func TestParseTopic(t *testing.T) {
 	}
 	if topic.Format != "FLAC" {
 		t.Errorf("формат = %q", topic.Format)
+	}
+	// Размер берём из скрытого счётчика с точным числом байтов.
+	if topic.Size != 1007486418 {
+		t.Errorf("размер = %d, ожидалось 1007486418", topic.Size)
+	}
+	if topic.Seeds != 90 {
+		t.Errorf("сидов = %d, ожидалось 90", topic.Seeds)
+	}
+	if topic.Peers != 34 {
+		t.Errorf("личеров = %d, ожидалось 34", topic.Peers)
 	}
 	if len(topic.Tracks) != 3 {
 		t.Fatalf("треков = %d, ожидалось 3: %+v", len(topic.Tracks), topic.Tracks)

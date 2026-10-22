@@ -18,6 +18,56 @@ var trackLineRe = regexp.MustCompile(`^\s*(\d{1,3})[\.\)\-–—\s]+(.+?)\s*(?:[
 var brSplitRe = regexp.MustCompile(`(?i)<br\s*/?>`)
 var durationRe = regexp.MustCompile(`^(\d{1,2}):(\d{2})(?::(\d{2}))?$`)
 
+// seedsRe и peersRe ищут «Сиды: 12» и «Личеры: 3» в тексте темы.
+var seedsRe = regexp.MustCompile(`(?i)сиды\s*[:：]?\s*(\d+)`)
+var peersRe = regexp.MustCompile(`(?i)личеры\s*[:：]?\s*(\d+)`)
+
+// topicSizeRe ищет «Размер: 960.81 MB» в тексте темы.
+var topicSizeRe = regexp.MustCompile(`(?i)размер\s*[:：]?\s*([\d.,]+\s*(?:bytes|kb|mb|gb|tb)?)`)
+
+// parseTopicSize достаёт размер раздачи.
+//
+// На странице темы есть скрытый счётчик с точным числом байтов
+// (<span id="tor-size-humn" title="1007486418">), а в блоке «Статистика
+// раздачи» — текст «Размер: 960.8 MB».
+func parseTopicSize(doc *goquery.Document) (int64, string) {
+	if sel := doc.Find("span#tor-size-humn").First(); sel.Length() > 0 {
+		if v, ok := sel.Attr("title"); ok {
+			if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+				return n, strings.TrimSpace(sel.Text())
+			}
+		}
+	}
+	text := doc.Text()
+	m := topicSizeRe.FindStringSubmatch(text)
+	if m == nil {
+		return 0, ""
+	}
+	value := strings.TrimSpace(m[1])
+	return ParseSize(value), value
+}
+
+// parseTopicPeers достаёт число сидов и личеров из блока раздачи
+// (<span class="seed">Сиды: 90</span>, <span class="leech">Личи: 34</span>).
+func parseTopicPeers(doc *goquery.Document) (seeds, peers int) {
+	if sel := doc.Find("span.seed b").First(); sel.Length() > 0 {
+		seeds, _ = strconv.Atoi(strings.TrimSpace(sel.Text()))
+	}
+	if sel := doc.Find("span.leech b").First(); sel.Length() > 0 {
+		peers, _ = strconv.Atoi(strings.TrimSpace(sel.Text()))
+	}
+	if seeds == 0 && peers == 0 {
+		text := doc.Text()
+		if m := seedsRe.FindStringSubmatch(text); m != nil {
+			seeds, _ = strconv.Atoi(m[1])
+		}
+		if m := peersRe.FindStringSubmatch(text); m != nil {
+			peers, _ = strconv.Atoi(m[1])
+		}
+	}
+	return seeds, peers
+}
+
 // Topic загружает и разбирает страницу темы.
 func (c *Client) Topic(ctx context.Context, topicID int64) (*Topic, error) {
 	page, err := c.Get(ctx, fmt.Sprintf("/forum/viewtopic.php?t=%d", topicID))
@@ -84,6 +134,11 @@ func ParseTopic(page []byte) (*Topic, error) {
 	}
 
 	t.Tracks = parseTracklist(doc)
+
+	// Размер, сиды и личеры — из информационного блока темы
+	// («Размер: 960.81 MB», «Сиды: 12», «Личеры: 3»).
+	t.Size, t.SizeText = parseTopicSize(doc)
+	t.Seeds, t.Peers = parseTopicPeers(doc)
 
 	// Исполнитель и альбом часто указаны только в заголовке темы
 	// («(Жанр) [ИСТОЧНИК] Исполнитель - Альбом - Год, ФОРМАТ, …»).

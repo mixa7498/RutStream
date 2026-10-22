@@ -4,6 +4,7 @@ package audio
 
 import (
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -15,6 +16,11 @@ func playToDevice(pcm []byte, f Format) error {
 
 // DeviceAvailable сообщает, доступен ли вывод в звуковую карту.
 func DeviceAvailable() bool { return false }
+
+// NewDeviceWriter — заглушка: звуковой карты в этой сборке нет.
+func NewDeviceWriter(f Format) (io.WriteCloser, error) {
+	return nil, fmt.Errorf("сборка без поддержки аудиоустройства (тег nodevice)")
+}
 
 // init — заглушка, чтобы пакет не требовал ничего лишнего.
 func init() {

@@ -185,6 +185,54 @@ func PlayRange(r io.Reader, format string, outFile string, skipSamples, limitSam
 	return res, nil
 }
 
+// PlayToWriter декодирует поток и пишет PCM в w (без буферизации целиком).
+//
+// Нужен для живого воспроизведения: трек играет по мере скачивания, а
+// пользователь может остановить его в любой момент.
+//
+// skipSamples — сколько сэмплов пропустить; limitSamples — сколько выдать
+// (0 — без ограничения).
+func PlayToWriter(r io.Reader, format string, w io.Writer, skipSamples, limitSamples int64) (*PlayResult, error) {
+	dec, err := OpenFormat(r, format)
+	if err != nil {
+		return nil, err
+	}
+	defer dec.Close()
+	if skipSamples > 0 {
+		dec.SkipSamples(skipSamples)
+	}
+	if limitSamples > 0 {
+		dec.LimitSamples(limitSamples)
+	}
+	f := dec.Format()
+	res := &PlayResult{Format: f}
+	buf := make([]byte, 64*1024)
+	for {
+		n, err := dec.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return res, werr
+			}
+			bytesPerFrame := f.Channels * 2
+			if bytesPerFrame > 0 {
+				res.Samples += n / bytesPerFrame
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return res, err
+		}
+	}
+	if f.SampleRate > 0 {
+		res.DurationSec = float64(res.Samples) / float64(f.SampleRate)
+	}
+	res.Output = "device"
+	res.Device = true
+	return res, nil
+}
+
 // FormatName возвращает человекочитаемое описание формата.
 func FormatName(f Format) string {
 	switch {

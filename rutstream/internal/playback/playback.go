@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -153,6 +154,89 @@ func (p *Player) PlayTrack(ctx context.Context, track Track, outFile string) (*R
 		TimeToFirstAudio: time.Since(start),
 		Elapsed:         time.Since(start),
 	}, nil
+}
+
+// PlayTrackTo воспроизводит трек, пиша PCM прямо в out (звуковая карта).
+//
+// В отличие от PlayTrack, трек не буферизуется целиком: звук идёт по мере
+// скачивания, и воспроизведение можно прервать (ctx).
+func (p *Player) PlayTrackTo(ctx context.Context, track Track, out io.Writer) (*Result, error) {
+	start := time.Now()
+
+	// Ограничиваем загрузку так же, как в PlayTrack.
+	if track.SkipSamples > 0 {
+		if err := p.session.SetWantedFiles(nil); err != nil {
+			return nil, err
+		}
+	} else if err := p.session.SetWantedFiles([]int{track.FileIdx}); err != nil {
+		return nil, err
+	}
+	r, err := p.session.OpenFile(track.FileIdx)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	// Формат определяем по сигнатуре.
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(r, head); err != nil {
+		return nil, fmt.Errorf("чтение заголовка: %w", err)
+	}
+	codec := track.Codec
+	switch {
+	case string(head) == "fLaC":
+		codec = "flac"
+	case head[0] == 0xFF && head[1]&0xE0 == 0xE0:
+		codec = "mp3"
+	case string(head) == "ID3":
+		codec = "mp3"
+	}
+	src := io.MultiReader(bytes.NewReader(head), r)
+
+	// Пишем в отдельную горутину: так можно прервать воспроизведение.
+	stop := make(chan struct{})
+	var werr error
+	done := make(chan struct{})
+	writer := &cancelWriter{w: out, stop: stop}
+	go func() {
+		defer close(done)
+		_, werr = audio.PlayToWriter(src, codec, writer, track.SkipSamples, track.LimitSamples)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		close(stop)
+		<-done
+	}
+	if werr != nil && !errors.Is(werr, errStopped) {
+		return nil, werr
+	}
+	st := p.session.Stats()
+	return &Result{
+		BytesDownloaded: st.BytesDownloaded,
+		BytesRead:       torrent.BytesRead(r),
+		TimeToFirstAudio: time.Since(start),
+		Elapsed:         time.Since(start),
+	}, nil
+}
+
+// errStopped — воспроизведение остановлено пользователем.
+var errStopped = errors.New("воспроизведение остановлено")
+
+// cancelWriter — writer, который прекращает запись по сигналу stop.
+type cancelWriter struct {
+	w    io.Writer
+	stop chan struct{}
+}
+
+func (c *cancelWriter) Write(p []byte) (int, error) {
+	select {
+	case <-c.stop:
+		return 0, errStopped
+	default:
+	}
+	return c.w.Write(p)
 }
 
 // PlanForTrack готовит piece-план для трека (для оценки трафика).
