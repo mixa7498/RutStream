@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -299,6 +300,7 @@ func (s *Session) SetWantedFiles(idxs []int) error {
 			files[i].SetPriority(bt.PiecePriorityNone)
 		}
 	}
+
 	return nil
 }
 
@@ -339,6 +341,132 @@ func BytesRead(r io.Reader) int64 {
 		return l.read
 	}
 	return 0
+}
+
+// FilesProgress возвращает, сколько байт уже скачано по указанным файлам и
+// сколько всего нужно (с учётом границ piece'ов).
+//
+// Используется для прогресса загрузки: сетевой счётчик показывает трафик,
+// а этот — реальную готовность файлов на диске.
+func (s *Session) FilesProgress(idxs []int) (done, total int64) {
+	files := s.t.Files()
+	for _, i := range idxs {
+		if i < 0 || i >= len(files) {
+			continue
+		}
+		total += files[i].Length()
+		done += files[i].BytesCompleted()
+	}
+	return done, total
+}
+
+// CleanupIncompleteFiles удаляет с диска файлы раздачи, которые заполнены
+// не полностью.
+//
+// Зачем: anacrolix при записи piece'а, пересекающего границу файлов,
+// создаёт ВСЕ затронутые файлы целиком (полного размера), но заполняет
+// только свою часть. В итоге рядом с нужным треком остаются «дырявые»
+// соседи: файл правильного размера, но с дырами вместо данных.
+//
+// Вызывать нужно в начале работы с раздачей: пока файл не открыт
+// anacrolix'ом, его можно удалить (Windows не даёт удалять открытый файл).
+func (s *Session) CleanupIncompleteFiles() []string {
+	root := s.eng.opts.DataDir
+	if root == "" {
+		return nil
+	}
+	var removed []string
+	for _, f := range s.t.Files() {
+		if f.BytesCompleted() >= f.Length() {
+			continue
+		}
+		path := filepath.Join(root, filepath.FromSlash(f.Path()))
+		info, err := os.Stat(path)
+		if err != nil || info.Size() == 0 {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			continue
+		}
+		removed = append(removed, f.Path())
+	}
+	return removed
+}
+
+// ListFiles возвращает множество имён файлов раздачи, существующих на диске.
+//
+// Ключ — путь файла относительно каталога данных (как его показывает
+// anacrolix).
+func (s *Session) ListFiles() map[string]bool {
+	out := map[string]bool{}
+	root := s.eng.opts.DataDir
+	if root == "" {
+		return out
+	}
+	for _, f := range s.t.Files() {
+		path := filepath.Join(root, filepath.FromSlash(f.Path()))
+		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+			out[f.Path()] = true
+		}
+	}
+	return out
+}
+
+// NewFilesSince возвращает пути файлов, которые появились на диске после
+// снимка before и не входят в keep.
+//
+// Нужны для уборки «дырявых» соседей: anacrolix создаёт их при записи
+// граничных piece'ов (файл полного размера, но заполнен частично).
+// Удалять нужно после закрытия клиента — пока файл открыт, Windows его
+// не удалит.
+func (s *Session) NewFilesSince(before map[string]bool, keep map[int]bool) []string {
+	root := s.eng.opts.DataDir
+	if root == "" {
+		return nil
+	}
+	files := s.t.Files()
+	var out []string
+	for i, f := range files {
+		if keep[i] {
+			continue
+		}
+		name := f.Path()
+		if before[name] {
+			// Файл был и до загрузки — не трогаем.
+			continue
+		}
+		path := filepath.Join(root, filepath.FromSlash(name))
+		st, err := os.Stat(path)
+		if err != nil || st.Size() == 0 {
+			continue
+		}
+
+		out = append(out, path)
+	}
+	return out
+}
+
+// RemoveFiles удаляет указанные файлы (игнорируя ошибки).
+//
+// Файлы могут быть ещё открыты anacrolix'ом (Windows не даёт удалить
+// открытый файл) — поэтому делаем несколько попыток с паузой: обычно
+// дескрипторы освобождаются сразу после закрытия клиента.
+func (s *Session) RemoveFiles(paths []string) int {
+	removed := 0
+	for _, p := range paths {
+		for attempt := 0; attempt < 10; attempt++ {
+			err := os.Remove(p)
+			if err == nil {
+				removed++
+				break
+			}
+			if os.IsNotExist(err) {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	return removed
 }
 
 // OpenFile открывает поток чтения файла раздачи.

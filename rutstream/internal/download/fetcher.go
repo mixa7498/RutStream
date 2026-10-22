@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
-	"github.com/mixa7/rutstream/internal/mediaindex"
 	"github.com/mixa7/rutstream/internal/torrent"
 )
 
@@ -23,6 +22,10 @@ type TorrentFetcher struct {
 }
 
 // Fetch скачивает файлы задания.
+//
+// Прогресс считается по реальной готовности файлов (сколько байт piece'ов
+// лежит на диске), а не по сетевому счётчику: тот учитывает служебный трафик
+// и выравнивание по piece'ам.
 func (f *TorrentFetcher) Fetch(ctx context.Context, task *Task, progress func(done, total int64)) error {
 	if f.MetaInfo == nil {
 		return fmt.Errorf("не задан источник metainfo")
@@ -31,8 +34,7 @@ func (f *TorrentFetcher) Fetch(ctx context.Context, task *Task, progress func(do
 	if err != nil {
 		return err
 	}
-	info, err := mi.UnmarshalInfo()
-	if err != nil {
+	if _, err := mi.UnmarshalInfo(); err != nil {
 		return err
 	}
 	session, err := f.Engine.Start(ctx, mi, torrent.StartOptions{
@@ -46,25 +48,37 @@ func (f *TorrentFetcher) Fetch(ctx context.Context, task *Task, progress func(do
 	if err := session.SetWantedFiles(task.FileIdxs); err != nil {
 		return err
 	}
-	var total int64
-	for _, i := range task.FileIdxs {
-		if p, err := mediaindex.PlanForFile(&info, i); err == nil {
-			total += p.ByteEnd - p.ByteStart
-		}
+	// Убираем «дырявые» файлы от прошлых запусков: anacrolix создаёт их
+	// при записи граничных piece'ов (полный размер, но с пропусками).
+	// Сейчас их можно удалить — файлы ещё не открыты.
+	if removed := session.CleanupIncompleteFiles(); len(removed) > 0 {
+		fmt.Printf("удалено частичных файлов: %d\n", len(removed))
 	}
+	// Снимок файлов до загрузки: после неё anacrolix может создать
+	// «дырявых» соседей по границам piece'ов.
+	before := session.ListFiles()
+	_, total := session.FilesProgress(task.FileIdxs)
 	if total == 0 {
 		return fmt.Errorf("нечего скачивать: файлы не определены")
 	}
+	progress(0, total)
 
-	start := session.Stats().BytesDownloaded
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
-		st := session.Stats()
-		done := st.BytesDownloaded - start
+		done, total := session.FilesProgress(task.FileIdxs)
 		progress(done, total)
 		if done >= total {
 			progress(total, total)
+			// Собираем «дырявые» файлы-соседи: anacrolix создаёт их при
+			// записи граничных piece'ов (полный размер, но с пропусками).
+			// Удалить их можно только после закрытия клиента — пока файл
+			// открыт, Windows его не удалит.
+			keep := make(map[int]bool, len(task.FileIdxs))
+			for _, i := range task.FileIdxs {
+				keep[i] = true
+			}
+			task.PartialFiles = session.NewFilesSince(before, keep)
 			return nil
 		}
 		select {

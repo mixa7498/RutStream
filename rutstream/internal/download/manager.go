@@ -57,6 +57,10 @@ type Task struct {
 	StartedAt  time.Time `json:"startedAt"`
 	FinishedAt time.Time `json:"finishedAt"`
 
+	// PartialFiles — файлы, созданные частично (соседи по границам piece'ов).
+	// Их нужно удалить после закрытия клиента.
+	PartialFiles []string `json:"-"`
+
 	// lastDone — предыдущее значение счётчика (для учёта трафика).
 	lastDone int64
 }
@@ -187,11 +191,17 @@ func (m *Manager) BudgetLeft() int64 {
 }
 
 // Run обрабатывает очередь до завершения (или отмены контекста).
+//
+// Возвращает управление, когда все задания завершены (успешно, с ошибкой
+// или отменой) и новых не добавлено.
 func (m *Manager) Run(ctx context.Context) error {
 	for {
 		task := m.next()
 		if task == nil {
-			// Очередь пуста — ждём сигнала или выходим.
+			// Очередь пуста или всё выполняется — проверяем, есть ли незавершённые.
+			if m.finished() {
+				return nil
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -278,6 +288,22 @@ func (m *Manager) next() *Task {
 		return nil
 	}
 	return ordered[0]
+}
+
+// finished сообщает, что все задания в очереди завершены.
+func (m *Manager) finished() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.tasks) == 0 {
+		return false
+	}
+	for _, t := range m.tasks {
+		switch t.State {
+		case StateQueued, StateRunning:
+			return false
+		}
+	}
+	return true
 }
 
 // AlbumFiles возвращает индексы файлов альбома внутри раздачи.

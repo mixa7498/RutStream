@@ -106,6 +106,12 @@ type app struct {
 }
 
 func newApp() (*app, error) {
+	return newAppWithStorage("")
+}
+
+// newAppWithStorage создаёт приложение с принудительным режимом хранения
+// ("disk" или "ram"); пустая строка — режим из переменной окружения.
+func newAppWithStorage(storage string) (*app, error) {
 	dataDir := os.Getenv("RUTSTREAM_DATA")
 	if dataDir == "" {
 		base, err := os.UserConfigDir()
@@ -133,6 +139,9 @@ func newApp() (*app, error) {
 	storageMode := strings.ToLower(os.Getenv("RUTSTREAM_STORAGE"))
 	if storageMode == "" {
 		storageMode = "disk"
+	}
+	if storage != "" {
+		storageMode = storage
 	}
 	var memLimit int64 = 512 << 20
 	if v := os.Getenv("RUTSTREAM_MEM_LIMIT_MB"); v != "" {
@@ -671,17 +680,32 @@ func cmdDownload(ctx context.Context, args []string) error {
 	if len(args) > 1 {
 		what = args[1]
 	}
-	a, err := newApp()
+	// Скачивание всегда идёт на диск: результат должен остаться у пользователя.
+	a, err := newAppWithStorage("disk")
 	if err != nil {
 		return err
 	}
-	defer a.close()
+	closed := false
+	defer func() {
+		if !closed {
+			a.close()
+		}
+	}()
 
 	mi, info, err := a.fetchTorrent(ctx, id)
 	if err != nil {
 		return err
 	}
-	ix, err := mediaindex.Build(info, mediaindex.Hints{})
+
+	// Сессия нужна и для индекса (однофайловые раздачи: треклист берётся из
+	// cue-файла), и для самой загрузки.
+	session, err := a.engine.Start(ctx, mi, torrent.StartOptions{Trackers: trackersOf(mi)})
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	ix, err := (&playback.IndexBuilder{Session: session, Info: info}).Build(ctx)
 	if err != nil {
 		return err
 	}
@@ -691,6 +715,7 @@ func cmdDownload(ctx context.Context, args []string) error {
 
 	var fileIdxs []int
 	label := ""
+	kind := download.KindTrack
 	switch what {
 	case "album":
 		album := ""
@@ -699,9 +724,11 @@ func cmdDownload(ctx context.Context, args []string) error {
 		}
 		fileIdxs = download.AlbumFiles(info, album, allFileIndexes(info))
 		label = "альбом " + album
+		kind = download.KindAlbum
 	case "discography", "all":
 		fileIdxs = allFileIndexes(info)
 		label = "дискография"
+		kind = download.KindDiscography
 	default:
 		n, err := strconv.Atoi(what)
 		if err != nil {
@@ -713,6 +740,11 @@ func cmdDownload(ctx context.Context, args []string) error {
 		track := ix.Tracks[n-1]
 		fileIdxs = []int{track.FileIdx}
 		label = fmt.Sprintf("трек №%d (%s)", n, track.Title)
+		if track.Source == mediaindex.SourceCue {
+			// Трек лежит внутри альбома: отдельного файла нет, придётся
+			// скачать весь FLAC целиком.
+			label += " — внутри альбома, скачается весь FLAC"
+		}
 	}
 
 	// Оценка объёма до старта.
@@ -726,7 +758,6 @@ func cmdDownload(ctx context.Context, args []string) error {
 	fmt.Printf("Файлов: %d, объём: %s (раздача целиком: %s)\n",
 		len(fileIdxs), human(total), human(info.TotalLength()))
 
-
 	fetcher := &download.TorrentFetcher{
 		Engine: a.engine,
 		MetaInfo: func(ctx context.Context, task *download.Task) (*metainfo.MetaInfo, error) {
@@ -736,7 +767,7 @@ func cmdDownload(ctx context.Context, args []string) error {
 	mgr := download.NewManager(fetcher, slog.Default())
 	hash, _ := torrent.InfoHashOf(mi)
 	mgr.Add(download.Task{
-		Kind:     download.KindTrack,
+		Kind:     kind,
 		TopicID:  id,
 		Title:    label,
 		InfoHash: hash,
@@ -749,6 +780,8 @@ func cmdDownload(ctx context.Context, args []string) error {
 	go func() {
 		_ = mgr.Run(runCtx)
 	}()
+	start := time.Now()
+	var lastDone int64
 	for {
 		tasks := mgr.Tasks()
 		if len(tasks) == 0 {
@@ -757,13 +790,41 @@ func cmdDownload(ctx context.Context, args []string) error {
 		t := tasks[0]
 		switch t.State {
 		case download.StateDone:
-			fmt.Printf("\nГотово: %s\n", human(t.BytesDone))
+			elapsed := time.Since(start).Seconds()
+			speed := 0.0
+			if elapsed > 0 {
+				speed = float64(t.BytesDone) / elapsed
+			}
+			fmt.Printf("\r  %s / %s (100%%) — %s при %.1f МБ/с        \n",
+				human(t.BytesDone), human(t.BytesTotal), human(t.BytesDone), speed/(1<<20))
+			fmt.Printf("Готово: %s\n", human(t.BytesDone))
+			fmt.Printf("Файлы: %s\n", filepath.Join(a.dataDir, "data"))
+			// Убираем «дырявые» файлы-соседи: anacrolix создаёт их при
+			// записи граничных piece'ов (полный размер, но с пропусками).
+			// Удалять можно только после закрытия клиента — пока файл
+			// открыт, Windows его не удалит.
+			partial := t.PartialFiles
+			session.Close()
+			a.close()
+			closed = true
+			if n := session.RemoveFiles(partial); n > 0 {
+				fmt.Printf("удалено частичных файлов: %d\n", n)
+			}
 			return nil
 		case download.StateFailed:
 			return fmt.Errorf("задание не выполнено: %s", t.Error)
 		}
-		fmt.Printf("\r  %s / %s (%.1f%%)   ", human(t.BytesDone), human(t.BytesTotal), t.Progress())
+		// Скорость за последний интервал.
+		now := time.Now()
+		speed := 0.0
+		if d := now.Sub(start).Seconds(); d > 0 {
+			speed = float64(t.BytesDone-lastDone) / d
+		}
+		lastDone = t.BytesDone
+		fmt.Printf("\r  %s / %s (%.1f%%) — %.2f МБ/с   ",
+			human(t.BytesDone), human(t.BytesTotal), t.Progress(), speed/(1<<20))
 		time.Sleep(500 * time.Millisecond)
+		start = time.Now()
 	}
 	return nil
 }
