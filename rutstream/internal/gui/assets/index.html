@@ -19,9 +19,9 @@
 </header>
 
 <div id="session-bar" class="session-bar" hidden>
-  <span class="session-label">Cookie rutracker:</span>
-  <textarea id="session-input" rows="2" spellcheck="false"
-    placeholder="Вставьте всю строку document.cookie: bb_session=…; cf_clearance=…"></textarea>
+  <span class="session-label">bb_session:</span>
+  <textarea id="session-input" rows="1" spellcheck="false"
+    placeholder="Вставьте значение bb_session: 0-12345678-…"></textarea>
   <div class="session-actions">
     <button id="session-save">Сохранить</button>
     <button id="session-clear" class="btn-quiet">Сбросить</button>
@@ -89,13 +89,15 @@
       <ol>
         <li><b>Войдите на rutracker.org</b> в обычном браузере — приложение
             работает с вашей сессией, а не хранит пароль.</li>
-        <li><b>Скопируйте cookie.</b> Нажмите F12 → вкладка <code>Console</code>,
-            введите <code>document.cookie</code> и нажмите Enter. Появится строка
-            вида <code>bb_session=…; cf_clearance=…</code>. Скопируйте её целиком
-            (не только значение после <code>bb_session=</code>).</li>
-        <li><b>Нажмите «Сессия»</b> вверху и вставьте строку в поле. «Сохранить».
-            Cookie хранится только на вашем компьютере, в каталоге данных
-            приложения, и никуда не отправляется.</li>
+        <li><b>Скопируйте bb_session.</b> Нажмите F12 → вкладка
+            <code>Application</code> → <code>Cookies</code> →
+            <code>https://rutracker.org</code>. Найдите строку
+            <code>bb_session</code> и скопируйте её <b>Value</b> — значение вида
+            <code>0-12345678-AbCdEf…</code>. Это cookie помечена HttpOnly,
+            поэтому в <code>document.cookie</code> её нет.</li>
+        <li><b>Нажмите «Сессия»</b> вверху и вставьте только это значение.
+            «Сохранить». Сессия хранится только на вашем компьютере, в каталоге
+            данных приложения, и никуда не отправляется.</li>
         <li><b>Найдите музыку:</b> введите исполнителя или альбом в поиск либо
             выберите раздел слева. У раздач видны качество, размер и число сидов.</li>
         <li><b>▶ — слушать.</b> Скачивается только выбранный трек, а не вся
@@ -109,11 +111,13 @@
       <p class="help-note">
         <b>Окно браузера при работе не открывается.</b> Если rutracker просит
         пройти проверку Cloudflare, приложение незаметно запускает скрытый
-        headless-браузер (Edge) — без окна и без значка в панели задач. Обычно
-        достаточно один раз вставить cookie.
+        headless-браузер (Edge) — без окна и без значка в панели задач. Он сам
+        получает Cloudflare-cookie, поэтому копировать <code>cf_clearance</code>
+        не нужно.
       </p>
       <p class="help-note">
-        Не удаётся войти? Проверьте, что строка скопирована целиком и что вы
+        Не удаётся войти? Проверьте, что скопировано именно значение
+        <code>bb_session</code> (оно начинается с <code>0-</code>) и что вы
         всё ещё авторизованы на rutracker.org в браузере. Диагностика:
         <code>rutstream.exe check</code>.
       </p>

@@ -34,9 +34,16 @@ fi
 
 # Подписать работающий файл нельзя (Windows держит его открытым), поэтому
 # подписываем копию — процесс rutstream.exe к этому моменту уже завершён.
+# Если сертификат уже создан, переиспользуем его: иначе каждый релиз получал
+# бы новый отпечаток, и установленный у пользователей сертификат переставал
+# бы подходить.
 echo "==> Подпись"
 cp bin/rutstream.exe bin/rutstream.tmp
-./bin/rutstream.exe sign bin/rutstream.tmp
+if [ -f bin/rutstream-key.pfx ]; then
+    ./bin/rutstream.exe sign --pfx bin/rutstream-key.pfx bin/rutstream.tmp
+else
+    ./bin/rutstream.exe sign bin/rutstream.tmp
+fi
 mv -f bin/rutstream.tmp bin/rutstream.exe
 
 # SHA-256 для проверки скачанного файла.

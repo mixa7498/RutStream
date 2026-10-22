@@ -114,7 +114,7 @@ func usage() {
 
 Переменные окружения:
   RUTSTREAM_USER / RUTSTREAM_PASS  логин и пароль rutracker
-  RUTSTREAM_COOKIE                готовая cookie bb_session (или вся строка document.cookie)
+  RUTSTREAM_COOKIE                значение bb_session (можно полную строку cookie)
   RUTSTREAM_PROXY                 socks5://host:port для сайта и пиров
   RUTSTREAM_NO_BROWSER            не запускать скрытый браузер (часть страниц недоступна)
   RUTSTREAM_BROWSER_VISIBLE=1     показать окно браузера (для отладки)
@@ -358,23 +358,25 @@ func (a *app) close() {
 
 // applySession переносит учётные данные из окружения или из сохранённого файла.
 func (a *app) applySession() {
-	// Переменная окружения может содержать как голое значение bb_session,
-	// так и всю строку document.cookie (тогда там есть и cf_clearance).
+	// Переменная окружения содержит значение bb_session; для совместимости
+	// принимаем и полную строку cookie.
 	if text := strings.TrimSpace(os.Getenv("RUTSTREAM_COOKIE")); text != "" {
-		a.client.SetCookieSet(rutracker.ExtractCookieSet(text))
-		ck := rutracker.ExtractSessionCookie(text)
-		if ck == "" {
-			ck = text
+		if ck := rutracker.ExtractSessionCookie(text); ck != "" {
+			set := rutracker.ExtractCookieSet(text)
+			set["bb_session"] = ck
+			a.client.SetCookieSet(set)
+			a.client.SetSessionCookie(ck)
+			a.loggedIn = true
+			return
 		}
-		a.client.SetSessionCookie(ck)
-		a.loggedIn = true
-		return
 	}
 	// Сохранённая с прошлого раза сессия.
 	if data, err := os.ReadFile(a.sessionFile()); err == nil && len(data) > 0 {
-		text := string(data)
-		a.client.SetCookieSet(rutracker.ExtractCookieSet(text))
+		text := strings.TrimSpace(string(data))
 		if ck := rutracker.ExtractSessionCookie(text); ck != "" {
+			set := rutracker.ExtractCookieSet(text)
+			set["bb_session"] = ck
+			a.client.SetCookieSet(set)
 			a.client.SetSessionCookie(ck)
 			a.loggedIn = true
 			return
@@ -399,28 +401,26 @@ func (a *app) sessionFile() string {
 	return filepath.Join(a.dataDir, "session.cookie")
 }
 
-// setSessionFromGUI применяет cookie сессии, введённый в окне приложения.
+// setSessionFromGUI применяет значение bb_session, введённое в окне приложения.
 //
-// Принимаем как голое значение bb_session, так и всю строку document.cookie:
-// во втором случае сохраняется и cf_clearance — с ней обычный HTTP-клиент
-// проходит проверку Cloudflare без запуска браузера.
+// bb_session помечена HttpOnly, поэтому в document.cookie её нет: пользователь
+// копирует значение из DevTools → Application → Cookies. На всякий случай
+// принимаем и полную строку cookie — тогда перенесём ещё и cf_clearance.
 func (a *app) setSessionFromGUI(text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return fmt.Errorf("пустая cookie")
+		return fmt.Errorf("пустое значение bb_session")
+	}
+	session := rutracker.ExtractSessionCookie(text)
+	if session == "" {
+		return fmt.Errorf("не найден bb_session — вставьте значение из DevTools, оно начинается с «0-»")
 	}
 	set := rutracker.ExtractCookieSet(text)
-	session := set["bb_session"]
-	if session == "" {
-		session = rutracker.ExtractSessionCookie(text)
-	}
-	if session == "" {
-		return fmt.Errorf("в строке нет bb_session")
-	}
 	set["bb_session"] = session
 	a.client.SetCookieSet(set)
 	a.client.SetSessionCookie(session)
-	if err := a.saveSession(text); err != nil {
+	// В файле храним только сессию, без лишнего текста из буфера обмена.
+	if err := a.saveSession("bb_session=" + session); err != nil {
 		return err
 	}
 
@@ -503,12 +503,11 @@ func cmdLogin(ctx context.Context) error {
 		return err
 	}
 	fmt.Println("  1) Войдите на rutracker.org (убедитесь, что в правом верхнем углу ваш ник)")
-	fmt.Println("  2) Скопируйте cookie одним из способов:")
-	fmt.Println("     а) DevTools → Application → Cookies → rutracker.org → bb_session → Value")
-	fmt.Println("     б) DevTools → Network → любой запрос → Headers → строка Cookie → скопировать всё")
-	fmt.Println("     (в варианте «б» попадёт и cf_clearance — с ней обычный клиент проходит Cloudflare)")
-	fmt.Println("  3) Скопируйте выделенное (Ctrl+C) и вернитесь сюда")
-	fmt.Print("  Ожидаю cookie из буфера обмена… ")
+	fmt.Println("  2) Откройте DevTools → Application → Cookies → rutracker.org")
+	fmt.Println("     и скопируйте значение bb_session (колонка Value, начинается с «0-»)")
+	fmt.Println("     В document.cookie этой cookie нет: она помечена HttpOnly.")
+	fmt.Println("  3) Скопируйте значение (Ctrl+C) и вернитесь сюда")
+	fmt.Print("  Ожидаю bb_session из буфера обмена… ")
 
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -517,12 +516,14 @@ func cmdLogin(ctx context.Context) error {
 	}
 	fmt.Println("готово.")
 	fmt.Println("Сессия активна:", a.client.LoggedIn(ctx))
-	// Сохраняем cookie, чтобы вход был одноразовым.
+	// Сохраняем значение, чтобы вход был одноразовым.
 	if text, err := rutracker.ReadClipboard(); err == nil {
-		if err := a.saveSession(text); err != nil {
-			fmt.Fprintln(os.Stderr, "не удалось сохранить сессию:", err)
-		} else {
-			fmt.Println("Сессия сохранена:", a.sessionFile())
+		if ck := rutracker.ExtractSessionCookie(text); ck != "" {
+			if err := a.saveSession("bb_session=" + ck); err != nil {
+				fmt.Fprintln(os.Stderr, "не удалось сохранить сессию:", err)
+			} else {
+				fmt.Println("Сессия сохранена:", a.sessionFile())
+			}
 		}
 	}
 	return nil

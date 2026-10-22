@@ -57,15 +57,17 @@
 ### 2. Авторизоваться на rutracker
 
 1. Откройте `rutracker.org` в обычном браузере и войдите.
-2. Нажмите `F12` → вкладка **Console**, выполните `document.cookie` и скопируйте
-   всю строку (в ней будут `bb_session` и `cf_clearance`).
-3. В приложении нажмите **«Сессия»** и вставьте строку в поле. «Сохранить».
+2. Нажмите `F12` → **Application** → **Cookies** → `https://rutracker.org`.
+   Найдите `bb_session` и скопируйте её **Value** — значение вида
+   `0-12345678-AbCdEf…`.
+3. В приложении нажмите **«Сессия»**, вставьте только это значение и сохраните.
 
-Cookie хранится только на вашем компьютере, в `%APPDATA%\RutStream\session.cookie`,
-и никуда не отправляется. Пароль приложению не нужен.
+`bb_session` помечена **HttpOnly**, поэтому `document.cookie` её не показывает —
+копировать нужно именно из таблицы cookie в DevTools.
 
-> Можно вставить и одно значение `bb_session`. Но со всей строкой `document.cookie`
-> приложение реже запускает браузер: `cf_clearance` уже прилагается.
+Сессия хранится только на вашем компьютере, в `%APPDATA%\RutStream\session.cookie`,
+и никуда не отправляется. Пароль приложению не нужен. Cloudflare-cookie
+(`cf_clearance`) копировать не нужно: скрытый браузер получает её сам.
 
 ### 3. Запустить
 
@@ -100,7 +102,7 @@ rutstream.exe raw /forum/index.php out.html   # сырой HTML (отладка 
 
 | Переменная | Назначение |
 |---|---|
-| `RUTSTREAM_COOKIE` | готовая cookie `bb_session` или вся строка `document.cookie` |
+| `RUTSTREAM_COOKIE` | значение `bb_session` (для совместимости — полная строка cookie) |
 | `RUTSTREAM_USER` / `RUTSTREAM_PASS` | логин и пароль (альтернатива cookie) |
 | `RUTSTREAM_STORAGE` | `ram` — без записи на SSD; `disk` — по умолчанию |
 | `RUTSTREAM_MEM_LIMIT_MB` | лимит памяти в режиме `ram` (по умолчанию 512) |

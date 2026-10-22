@@ -11,10 +11,14 @@ import (
 	"time"
 )
 
-// bbSessionRe выделяет значение cookie bb_session.
-var bbSessionRe = regexp.MustCompile(`bb_session=([A-Za-z0-9\-_]+)`)
+// bbSessionRe выделяет значение cookie bb_session из строки вида
+// «bb_session=…», «bb_session: …» или строки таблицы DevTools.
+var bbSessionRe = regexp.MustCompile(`(?i)bb_session[ \t]*[=:]?[ \t]*["']?([A-Za-z0-9_-]+)`)
 
-// cookiePairRe разбирает пару «имя=значение» в строке document.cookie.
+// bareSessionRe — значение bb_session без имени cookie: «0-12345678-…».
+var bareSessionRe = regexp.MustCompile(`^[0-9]+-[0-9]+-[A-Za-z0-9_-]+$`)
+
+// cookiePairRe разбирает пару «имя=значение» в строке cookie.
 var cookiePairRe = regexp.MustCompile(`([A-Za-z0-9_\-]+)=([^;\s]*)`)
 
 // OpenLoginPage открывает страницу входа в браузере пользователя по умолчанию.
@@ -35,20 +39,35 @@ func OpenLoginPage(mirror string) error {
 	return fmt.Errorf("не удалось открыть браузер: откройте вручную %s", url)
 }
 
-// ExtractSessionCookie достаёт значение bb_session из произвольной строки
-// (например, из буфера обмена, куда скопировали document.cookie).
+// ExtractSessionCookie достаёт значение bb_session из произвольной строки.
+//
+// Принимается:
+//   - голое значение из DevTools: «0-12345678-AbCdEf…»;
+//   - строка «bb_session=…» или «bb_session: …»;
+//   - полная строка cookie, скопированная из заголовка запроса.
+//
+// document.cookie здесь не поможет: bb_session помечена HttpOnly и в
+// JavaScript не видна.
 func ExtractSessionCookie(s string) string {
-	m := bbSessionRe.FindStringSubmatch(s)
-	if m == nil {
+	s = strings.TrimSpace(s)
+	if s == "" {
 		return ""
 	}
-	return m[1]
+	// Кавычки появляются, если значение скопировали из JSON или таблицы.
+	s = strings.Trim(s, "\"'")
+	if bareSessionRe.MatchString(s) {
+		return s
+	}
+	if m := bbSessionRe.FindStringSubmatch(s); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
-// ExtractCookieSet разбирает строку document.cookie в набор «имя → значение».
+// ExtractCookieSet разбирает строку cookie в набор «имя → значение».
 //
-// Важно: кроме bb_session там может быть cf_clearance — Cloudflare-cookie,
-// которая позволяет обычному HTTP-клиенту проходить проверку без браузера.
+// Нужен для совместимости: если пользователь вставил полную строку cookie,
+// вместе с bb_session можно перенести и cf_clearance.
 func ExtractCookieSet(s string) map[string]string {
 	out := map[string]string{}
 	for _, m := range cookiePairRe.FindAllStringSubmatch(s, -1) {
@@ -106,8 +125,8 @@ func ReadClipboard() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// ImportSessionFromClipboard забирает из буфера обмена набор cookie
-// (bb_session и, возможно, cf_clearance) и проверяет его работоспособность.
+// ImportSessionFromClipboard забирает из буфера обмена значение bb_session
+// (или полную строку cookie) и проверяет его работоспособность.
 func (c *Client) ImportSessionFromClipboard(ctx context.Context) error {
 	text, err := ReadClipboard()
 	if err != nil {
@@ -120,10 +139,11 @@ func (c *Client) ImportSessionFromClipboard(ctx context.Context) error {
 func (c *Client) ImportCookies(ctx context.Context, text string) error {
 	cookie := ExtractSessionCookie(text)
 	if cookie == "" {
-		return fmt.Errorf("в строке нет cookie bb_session — скопируйте её вручную: " +
+		return fmt.Errorf("не найден bb_session — скопируйте значение: " +
 			"DevTools → Application → Cookies → rutracker.org → bb_session → Value")
 	}
 	set := ExtractCookieSet(text)
+	set["bb_session"] = cookie
 	c.SetCookieSet(set)
 	c.SetSessionCookie(cookie)
 	if !c.LoggedIn(ctx) {
@@ -134,7 +154,7 @@ func (c *Client) ImportCookies(ctx context.Context, text string) error {
 
 // WaitForSessionCookie ждёт, пока пользователь скопирует cookie в буфер обмена.
 //
-// Принимается и полный набор (document.cookie), и «голое» значение bb_session.
+// Принимается и значение bb_session, и полная строка cookie.
 func (c *Client) WaitForSessionCookie(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

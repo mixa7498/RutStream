@@ -189,11 +189,10 @@ func writeErr(w http.ResponseWriter, err error) {
 	writeJSON(w, map[string]string{"error": err.Error()})
 }
 
-// apiSession — ввод и сохранение cookie сессии rutracker.
+// apiSession — ввод и сохранение сессии rutracker.
 //
-// Пользователю не нужно ни разбираться с переменными окружения, ни лезть
-// в DevTools за DevTools-инструментами: значение bb_session вставляется прямо
-// в окно приложения, сохраняется в файл сессии и применяется немедленно.
+// bb_session помечена HttpOnly: в document.cookie её нет. Пользователь
+// копирует значение из DevTools → Application → Cookies → rutracker.org.
 func (s *Server) apiSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Cookie string `json:"cookie"`
@@ -209,26 +208,18 @@ func (s *Server) apiSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "loggedIn": false})
 		return
 	}
-	text := strings.TrimSpace(req.Cookie)
-	// Принимаем и голое значение bb_session, и всю строку document.cookie —
-	// во втором случае сохраняется ещё и cf_clearance.
-	set := rutracker.ExtractCookieSet(text)
-	session := set["bb_session"]
+	session := rutracker.ExtractSessionCookie(req.Cookie)
 	if session == "" {
-		session = rutracker.ExtractSessionCookie(text)
-	}
-	if session == "" {
-		writeErr(w, fmt.Errorf("в строке нет cookie bb_session — скопируйте всю строку document.cookie"))
+		writeErr(w, fmt.Errorf("не найден bb_session — скопируйте значение из DevTools, оно начинается с «0-»"))
 		return
 	}
-	if err := s.opts.SaveSession(text); err != nil {
+	if err := s.opts.SaveSession(session); err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{
-		"ok":           true,
-		"loggedIn":     true,
-		"hasClearance": set["cf_clearance"] != "",
+		"ok":       true,
+		"loggedIn": true,
 	})
 }
 

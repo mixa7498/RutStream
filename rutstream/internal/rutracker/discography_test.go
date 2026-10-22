@@ -113,10 +113,22 @@ func TestExtractCookieSet(t *testing.T) {
 }
 
 func TestExtractSessionCookie(t *testing.T) {
-	if got := ExtractSessionCookie("bb_session=0-abc-def; bb_ssl=1"); got != "0-abc-def" {
-		t.Errorf("ExtractSessionCookie = %q", got)
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"с именем", "bb_session=0-abc-def; bb_ssl=1", "0-abc-def"},
+		{"с двоеточием", "bb_session: 0-abc-def", "0-abc-def"},
+		{"голое значение", "0-12345678-AbCdEfGhIjKl", "0-12345678-AbCdEfGhIjKl"},
+		{"в кавычках", `"0-12345678-AbCdEfGhIjKl"`, "0-12345678-AbCdEfGhIjKl"},
+		{"с пробелами", "  0-12345678-AbCdEfGhIjKl  ", "0-12345678-AbCdEfGhIjKl"},
+		{"без сессии", "bb_guid=lb4Fzsiw7zij; bb_ssl=1", ""},
+		{"пусто", "", ""},
 	}
-	if got := ExtractSessionCookie("bb_guid=lb4Fzsiw7zij; bb_ssl=1"); got != "" {
-		t.Errorf("ожидалась пустая строка, получено %q", got)
+	for _, tc := range cases {
+		if got := ExtractSessionCookie(tc.in); got != tc.want {
+			t.Errorf("%s: ExtractSessionCookie(%q) = %q, ожидалось %q", tc.name, tc.in, got, tc.want)
+		}
 	}
 }

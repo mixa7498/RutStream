@@ -429,21 +429,19 @@ async function saveSession() {
   const value = $('#session-input').value.trim();
   const msg = $('#session-msg');
   if (!value) {
-    msg.textContent = 'Вставьте строку cookie (document.cookie)';
+    msg.textContent = 'Вставьте значение bb_session (оно начинается с «0-»)';
     msg.className = 'session-msg err';
     return;
   }
   msg.textContent = 'Сохраняем…';
   msg.className = 'session-msg';
   try {
-    const r = await api('session', {
+    await api('session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cookie: value }),
     });
-    msg.textContent = r.hasClearance
-      ? 'Сохранено: сессия и cookie Cloudflare'
-      : 'Сохранено. Совет: копируйте всю строку document.cookie — в ней есть cf_clearance.';
+    msg.textContent = 'Сессия сохранена';
     msg.className = 'session-msg ok';
     $('#session-input').value = '';
     state.sessionOpen = false;
