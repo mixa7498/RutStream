@@ -108,11 +108,37 @@ type PlayResult struct {
 // Если outFile задан — PCM пишется в WAV-файл (используется в тестах и при
 // отсутствии звуковой карты). Иначе — вывод через системное устройство.
 func Play(r io.Reader, format string, outFile string) (*PlayResult, error) {
+	return PlayWithSkip(r, format, outFile, 0)
+}
+
+// PlayWithSkip — как Play, но пропускает первые skipSamples сэмплов.
+//
+// Нужно для треков внутри альбома: до нужного трека кадры надо декодировать,
+// но в PCM они не попадают.
+func PlayWithSkip(r io.Reader, format string, outFile string, skipSamples int64) (*PlayResult, error) {
+	return PlayRange(r, format, outFile, skipSamples, 0)
+}
+
+// PlayRange — декодирование с пропуском в начале и ограничением объёма.
+//
+// skipSamples — сколько сэмплов пропустить (трек внутри альбома);
+// limitSamples — сколько сэмплов выдать (0 — без ограничения).
+//
+// Ограничение объёма важно для выборочной загрузки: декодер останавливается на
+// границе трека, поток перестаёт читать файл, и торрент-клиент не качает
+// следующие куски альбома.
+func PlayRange(r io.Reader, format string, outFile string, skipSamples, limitSamples int64) (*PlayResult, error) {
 	dec, err := OpenFormat(r, format)
 	if err != nil {
 		return nil, err
 	}
 	defer dec.Close()
+	if skipSamples > 0 {
+		dec.SkipSamples(skipSamples)
+	}
+	if limitSamples > 0 {
+		dec.LimitSamples(limitSamples)
+	}
 	f := dec.Format()
 
 	var pcm []byte

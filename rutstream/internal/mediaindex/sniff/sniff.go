@@ -39,6 +39,10 @@ type Result struct {
 	Tracks      []Track
 	Tags        map[string]string
 	HasCueSheet bool
+	// AudioDataOffset — смещение начала аудиоданных в файле
+	// (после блоков метаданных). Нужно, чтобы перевести сэмплы cue-разметки
+	// в байты файла.
+	AudioDataOffset int64
 }
 
 // ErrUnsupported — формат не распознан.
@@ -162,7 +166,8 @@ func probeFLAC(r io.ReaderAt, size int64) (*Result, error) {
 	if _, err := r.ReadAt(buf, 4); err != nil {
 		return res, err
 	}
-	pos := int64(8)
+	// Блоки метаданных начинаются сразу после сигнатуры «fLaC» (4 байта).
+	pos := int64(4)
 	for {
 		if pos+4 > size {
 			break
@@ -202,6 +207,8 @@ func probeFLAC(r io.ReaderAt, size int64) (*Result, error) {
 			}
 		}
 	}
+	// Аудиоданные начинаются после блоков метаданных.
+	res.AudioDataOffset = pos
 	return res, nil
 }
 

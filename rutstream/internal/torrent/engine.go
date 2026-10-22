@@ -63,7 +63,20 @@ type Options struct {
 	StorageMode string
 	// MemLimit — лимит памяти для режима "ram" (байт; 0 — без лимита).
 	MemLimit int64
+	// ReadaheadBytes — окно опережающего чтения (в байтах; 0 — значение по
+	// умолчанию движка).
+	//
+	// Клиент качает куски чуть впереди текущей позиции чтения, чтобы
+	// воспроизведение шло без запинок. Слишком большое окно — лишний трафик:
+	// для трека внутри альбома скачался бы остаток альбома.
+	ReadaheadBytes int64
 }
+
+// DefaultReadahead — окно опережающего чтения по умолчанию (256 КБ).
+//
+// Этого хватает на пару piece'ов вперёд (при piece 128 КБ) — воспроизведение
+// идёт ровно, а лишний трафик не растёт.
+const DefaultReadahead = 256 * 1024
 
 // Engine — BitTorrent-клиент.
 type Engine struct {
@@ -78,6 +91,9 @@ type Engine struct {
 func New(opts Options) (*Engine, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	if opts.ReadaheadBytes <= 0 {
+		opts.ReadaheadBytes = DefaultReadahead
 	}
 	cfg := bt.NewDefaultClientConfig()
 	cfg.DataDir = opts.DataDir
@@ -191,6 +207,8 @@ type Session struct {
 
 	mu     sync.Mutex
 	wanted map[int]bool
+	// readahead — размер окна опережающего чтения (в байтах).
+	readahead int64
 }
 
 // StartOptions — параметры запуска сессии.
@@ -241,7 +259,14 @@ func (e *Engine) Start(ctx context.Context, mi *metainfo.MetaInfo, opts StartOpt
 	if err != nil {
 		return nil, fmt.Errorf("добавление раздачи: %w", err)
 	}
-	return &Session{t: t, mi: mi, info: &info, eng: e, wanted: map[int]bool{}}, nil
+	return &Session{
+		t:         t,
+		mi:        mi,
+		info:      &info,
+		eng:       e,
+		wanted:    map[int]bool{},
+		readahead: e.opts.ReadaheadBytes,
+	}, nil
 }
 
 // InfoHash возвращает hex-хеш раздачи.
@@ -305,6 +330,17 @@ func (s *Session) ClearWantedPieces() {
 	s.mu.Unlock()
 }
 
+// BytesRead возвращает, сколько байт прочитано из потока файла раздачи.
+//
+// Диагностика: показывает реальный объём данных, которые пришлось прочитать
+// (и, значит, скачать) для воспроизведения трека.
+func BytesRead(r io.Reader) int64 {
+	if l, ok := r.(*limitedFileReader); ok {
+		return l.read
+	}
+	return 0
+}
+
 // OpenFile открывает поток чтения файла раздачи.
 // Чтение «подтягивает» нужные piece'ы автоматически (readahead).
 //
@@ -319,6 +355,16 @@ func (s *Session) OpenFile(fileIdx int) (io.ReadSeekCloser, error) {
 	}
 	f := files[fileIdx]
 	r := f.NewReader()
+	// Фиксированное окно опережающего чтения.
+	//
+	// По умолчанию anacrolix считает readahead как расстояние от начала
+	// непрерывного чтения: чем дальше мы прочитали, тем шире окно приоритетов
+	// и тем больше кусов клиент качает «про запас» (для трека внутри альбома
+	// это означало скачивание всего файла). Нам нужен небольшой фиксированный
+	// запас — пара piece'ов вперёд для ровного воспроизведения.
+	if rr, ok := r.(interface{ SetReadahead(int64) }); ok {
+		rr.SetReadahead(s.readahead)
+	}
 	return &limitedFileReader{r: r, length: f.Length()}, nil
 }
 
@@ -327,6 +373,8 @@ type limitedFileReader struct {
 	r      io.ReadSeeker
 	length int64
 	pos    int64
+	// read — сколько байт прочитано (диагностика объёма загрузки).
+	read int64
 }
 
 // Read читает не больше оставшегося объёма файла.
@@ -339,6 +387,7 @@ func (l *limitedFileReader) Read(p []byte) (int, error) {
 	}
 	n, err := l.r.Read(p)
 	l.pos += int64(n)
+	l.read += int64(n)
 	if err == nil && l.pos >= l.length {
 		err = io.EOF
 	}

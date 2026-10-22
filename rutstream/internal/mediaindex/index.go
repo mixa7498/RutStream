@@ -47,6 +47,17 @@ type TrackPlan struct {
 	Container string `json:"container"`
 	// ContainerMethod — метод сжатия внутри контейнера (0 — без сжатия, 8 — deflate).
 	ContainerMethod uint16 `json:"containerMethod"`
+	// SkipSamples — сколько сэмплов пропустить в начале файла
+	// (для треков внутри альбома с cue-разметкой).
+	SkipSamples int64 `json:"skipSamples"`
+	// LimitSamples — сколько сэмплов трека (0 — весь файл).
+	// По этому ограничению декодер останавливается на границе трека, и загрузка
+	// не идёт дальше нужного куска альбома.
+	LimitSamples int64 `json:"limitSamples"`
+	// EstimateBytes — оценка объёма скачиваемого сжатого данных.
+	// Для обычных треков равно размеру файла, для cue-треков — пропорционально
+	// длительности трека.
+	EstimateBytes int64 `json:"estimateBytes"`
 }
 
 // SiteTrack — трек, прочитанный со страницы раздачи на rutracker.
@@ -248,17 +259,12 @@ func (ix *Index) cueTracks(fileIdx int, res *sniff.Result, hints Hints) []CueTra
 		ix.Diag = "в cue нет треков для " + audioName
 		return nil
 	}
-	// Переводим сэмплы в байты аудиоданных.
-	channels := res.Channels
-	if channels <= 0 {
-		channels = 2
+	// Проставляем концы треков в сэмплах (по числу сэмплов файла).
+	total := int64(0)
+	if res.SampleRate > 0 && res.DurationSec > 0 {
+		total = int64(res.DurationSec * float64(res.SampleRate))
 	}
-	bits := res.BitDepth
-	if bits <= 0 {
-		bits = 16
-	}
-	audioBytes := ix.Files[fileIdx].Length
-	return sheet.TrackBytes(tracks, channels, bits, audioBytes)
+	return sheet.TrackSamples(tracks, total)
 }
 
 // matchSiteTrack ищет соответствующий трек в треклисте сайта.
@@ -330,8 +336,16 @@ func buildSingleFile(ix *Index, fileIdx int, hints Hints) error {
 			// Альбом внутри одного файла: границы треков даёт cue-файл раздачи.
 			if tracks := ix.cueTracks(fileIdx, res, hints); len(tracks) > 1 {
 				ix.Tracks = nil
+				// Размер трека без сжатия (для показа) и пропорциональная
+				// оценка скачиваемого объёма.
+				bytesPerSample := int64(res.Channels * res.BitDepth / 8)
+				if bytesPerSample <= 0 {
+					bytesPerSample = 4
+				}
+				fileLen := ix.Files[fileIdx].Length
+				albumDur := res.DurationSec
 				for _, ct := range tracks {
-					if ct.End <= ct.Index {
+					if ct.EndSamples <= ct.Index {
 						// Пустой трек (разметка не покрывает файл) — пропускаем.
 						continue
 					}
@@ -339,15 +353,29 @@ func buildSingleFile(ix *Index, fileIdx int, hints Hints) error {
 					sub.ID = fmt.Sprintf("%s:%d", full, ct.Number)
 					sub.Title = ct.Title
 					sub.Pos = ct.Number
-					sub.ByteStart = plan.ByteStart + ct.Index
-					sub.ByteEnd = plan.ByteStart + ct.End
-					sub.DurationSec = float64(ct.End-ct.Index) / float64(res.SampleRate*res.Channels*res.BitDepth/8)
+					// Позиция трека в байтах — приблизительная (кадры FLAC
+					// сжаты, поэтому сэмпл ≠ байт). Точной является
+					// длительность: по ней ограничивается загрузка.
+					sub.ByteStart = plan.ByteStart + ct.Index*bytesPerSample
+					sub.ByteEnd = plan.ByteStart + ct.EndSamples*bytesPerSample
+					sub.DurationSec = float64(ct.EndSamples-ct.Index) / float64(res.SampleRate)
 					sub.Source = SourceCue
 					sub.Confidence = 0.9
-					pr := PieceRangeFor(sub.ByteStart, sub.ByteEnd, ix.Info.PieceLength)
-					sub.PieceStart = pr.Start
-					sub.PieceEnd = pr.End
-					sub.ExtraBytes = ExtraBytes(sub.ByteStart, sub.ByteEnd, ix.Info.PieceLength)
+					// FLAC — потоковый формат: чтобы дойти до трека, надо
+					// декодировать (и скачать) предыдущие кадры. Поэтому
+					// piece-план трека начинается с начала файла, а объём
+					// ограничивается длительностью трека.
+					sub.SkipSamples = ct.Index
+					sub.LimitSamples = ct.EndSamples - ct.Index
+					sub.PieceStart = plan.PieceStart
+					sub.PieceEnd = plan.PieceEnd
+					if albumDur > 0 && fileLen > 0 {
+						// Скачать придётся всё до конца трека: FLAC — потоковый
+						// формат, до нужного трека кадры надо декодировать.
+						// Оценка: доля конца трека в альбоме × размер файла.
+						endSec := float64(ct.EndSamples) / float64(res.SampleRate)
+						sub.EstimateBytes = int64(float64(fileLen) * endSec / albumDur)
+					}
 					ix.Tracks = append(ix.Tracks, sub)
 				}
 				return nil

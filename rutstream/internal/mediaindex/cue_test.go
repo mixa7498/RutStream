@@ -74,26 +74,27 @@ func TestCueTracksForFile(t *testing.T) {
 	}
 }
 
-func TestCueTrackBytes(t *testing.T) {
+func TestCueTrackSamples(t *testing.T) {
 	sheet, err := ParseCue(strings.NewReader(cueFixture))
 	if err != nil {
 		t.Fatal(err)
 	}
 	tracks := sheet.CueTracksForFile("Rubber Soul (2026 Stereo Mix).flac")
-	// Стерео, 16 бит → 4 байта на сэмпл.
-	const totalBytes = 100 * 1024 * 1024
-	out := sheet.TrackBytes(tracks, 2, 16, totalBytes)
+	// Альбом длится 10 минут = 26 460 000 сэмплов.
+	const totalSamples = 600 * 44100
+	out := sheet.TrackSamples(tracks, totalSamples)
 	if len(out) != 3 {
 		t.Fatalf("треков = %d", len(out))
 	}
 	if out[0].Index != 0 {
 		t.Errorf("начало = %d", out[0].Index)
 	}
-	if out[0].End != out[1].Index {
-		t.Errorf("конец трека 1 = %d, ожидалось %d", out[0].End, out[1].Index)
+	// Конец трека = начало следующего.
+	if out[0].EndSamples != out[1].Index {
+		t.Errorf("конец трека 1 = %d, ожидалось %d", out[0].EndSamples, out[1].Index)
 	}
-	if out[2].End != totalBytes {
-		t.Errorf("конец последнего трека = %d, ожидалось %d", out[2].End, totalBytes)
+	if out[2].EndSamples != totalSamples {
+		t.Errorf("конец последнего трека = %d, ожидалось %d", out[2].EndSamples, totalSamples)
 	}
 	// Границы должны возрастать.
 	for i := 1; i < len(out); i++ {

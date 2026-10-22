@@ -11,6 +11,7 @@ import (
 
 	"github.com/hajimehoshi/go-mp3"
 	"github.com/mewkiz/flac"
+	"github.com/mewkiz/flac/frame"
 )
 
 // Format — параметры аудиопотока.
@@ -36,6 +37,20 @@ type Decoder struct {
 	pcm []byte
 	pos int
 	eof bool
+
+	// skipSamples — сколько сэмплов пропустить в начале (для треков внутри
+	// альбома с cue-разметкой: до нужного трека надо декодировать предыдущие).
+	skipSamples int64
+	// skipped — сколько уже пропущено.
+	skipped int64
+	// limitSamples — сколько сэмплов выдать (0 — без ограничения).
+	// Нужно, чтобы остановить декодирование на границе трека: тогда поток
+	// перестанет читать, и лишние piece'ы не будут скачиваться.
+	limitSamples int64
+	// produced — сколько сэмплов выдано.
+	produced int64
+	// bytesPerSample — размер одного сэмпла в байтах (каналы × 2).
+	bytesPerSample int
 }
 
 // Open создаёт декодер, определяя формат по сигнатуре.
@@ -81,6 +96,7 @@ func OpenFormat(r io.Reader, format string) (*Decoder, error) {
 				Channels:      int(info.NChannels),
 				BitsPerSample: int(info.BitsPerSample),
 			},
+			bytesPerSample: int(info.NChannels) * 2,
 		}, nil
 	case "mp3":
 		dec, err := mp3.NewDecoder(r)
@@ -105,6 +121,27 @@ func OpenFormat(r io.Reader, format string) (*Decoder, error) {
 
 // Format возвращает параметры потока.
 func (d *Decoder) Format() Format { return d.format }
+
+// SkipSamples задаёт количество сэмплов, которые нужно пропустить в начале.
+//
+// Нужно для треков внутри альбома: FLAC — потоковый формат, чтобы дойти до
+// третьего трека, надо декодировать (и скачать) предыдущие кадры.
+func (d *Decoder) SkipSamples(n int64) {
+	if n > 0 {
+		d.skipSamples = n
+	}
+}
+
+// LimitSamples ограничивает количество выдаваемых сэмплов (0 — без ограничения).
+//
+// Это ключ к выборочной загрузке трека внутри альбома: декодер останавливается
+// на границе трека, поток больше не читает файл, и торрент-клиент не качает
+// следующие piece'ы.
+func (d *Decoder) LimitSamples(n int64) {
+	if n > 0 {
+		d.limitSamples = n
+	}
+}
 
 // Kind возвращает тип исходного формата.
 func (d *Decoder) Kind() string { return d.kind }
@@ -143,9 +180,7 @@ func (d *Decoder) readFLAC(p []byte) (int, error) {
 				return 0, io.EOF
 			}
 			return 0, err
-
 		}
-		// Конвертируем сэмплы фрейма в PCM s16le.
 		nch := len(f.Subframes)
 		if nch == 0 {
 			continue
@@ -156,34 +191,65 @@ func (d *Decoder) readFLAC(p []byte) (int, error) {
 		if nsamples <= 0 {
 			nsamples = len(f.Subframes[0].Samples)
 		}
-		need := nsamples * nch * 2
-		buf := make([]byte, 0, need)
-		for i := 0; i < nsamples; i++ {
-			for ch := 0; ch < nch; ch++ {
-				sf := f.Subframes[ch]
-				var v int32
-				switch {
-				case len(sf.Samples) >= nsamples:
-					v = sf.Samples[i]
-				case len(sf.Samples) == 1:
-					// CONSTANT-субфрейм: одно значение на весь кадр.
-					v = sf.Samples[0]
-				case len(sf.Samples) > 0:
-					v = sf.Samples[i%len(sf.Samples)]
-				}
-				var b [2]byte
-				binary.LittleEndian.PutUint16(b[:], uint16(int16(v)))
-				buf = append(buf, b[0], b[1])
+		// Пропуск сэмплов в начале (трек внутри альбома с cue-разметкой):
+		// до нужного трека кадры надо декодировать, но в PCM они не попадают.
+		from := 0
+		if d.skipped < d.skipSamples {
+			need := d.skipSamples - d.skipped
+			if int64(nsamples) <= need {
+				d.skipped += int64(nsamples)
+				continue
+			}
+			from = int(need)
+			d.skipped = d.skipSamples
+		}
+		// Ограничение объёма: трек внутри альбома заканчивается раньше конца
+		// файла. Обрезаем кадр, чтобы декодер остановился на границе трека.
+		if d.limitSamples > 0 {
+			room := d.limitSamples - d.produced
+			if room <= 0 {
+				d.eof = true
+				return 0, io.EOF
+			}
+			if int64(nsamples-from) > room {
+				nsamples = from + int(room)
 			}
 		}
-		d.pcm = buf
+		d.pcm = frameToPCM(f, from, nsamples)
 		d.pos = 0
 	}
 	n := copy(p, d.pcm[d.pos:])
 	d.pos += n
+	if d.bytesPerSample > 0 {
+		d.produced += int64(n / d.bytesPerSample)
+	}
 	return n, nil
 }
 
+// frameToPCM конвертирует сэмплы кадра в PCM s16le, начиная с индекса from.
+func frameToPCM(f *frame.Frame, from, nsamples int) []byte {
+	nch := len(f.Subframes)
+	out := make([]byte, 0, (nsamples-from)*nch*2)
+	var b [2]byte
+	for i := from; i < nsamples; i++ {
+		for ch := 0; ch < nch; ch++ {
+			sf := f.Subframes[ch]
+			var v int32
+			switch {
+			case len(sf.Samples) >= nsamples:
+				v = sf.Samples[i]
+			case len(sf.Samples) == 1:
+				// CONSTANT-субфрейм: одно значение на весь кадр.
+				v = sf.Samples[0]
+			case len(sf.Samples) > 0:
+				v = sf.Samples[i%len(sf.Samples)]
+			}
+			binary.LittleEndian.PutUint16(b[:], uint16(int16(v)))
+			out = append(out, b[0], b[1])
+		}
+	}
+	return out
+}
 // Close освобождает ресурсы.
 func (d *Decoder) Close() error {
 	if d.flacStream != nil {

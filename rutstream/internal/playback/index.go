@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/mixa7/rutstream/internal/mediaindex"
@@ -19,22 +20,32 @@ import (
 type IndexBuilder struct {
 	Session *torrent.Session
 	Info    *metainfo.Info
+
+	mu      sync.Mutex
+	readers []io.Closer
 }
 
 // Build строит индекс раздачи.
 //
 // Если раздача содержит один аудиофайл, чтение его заголовка инициирует
 // докачку нужных piece'ов — специально ничего «скачивать заранее» не нужно.
+//
+// Все открытые потоки закрываются: незакрытый ридер удерживает окно
+// опережающего чтения, и клиент продолжает докачивать лишние куски.
 func (b *IndexBuilder) Build(ctx context.Context) (*mediaindex.Index, error) {
 	if b.Session == nil || b.Info == nil {
 		return nil, fmt.Errorf("index: нет сессии или info")
 	}
+	defer b.closeReaders()
 	hints := mediaindex.Hints{
 		ReaderFor: func(fileIdx int) (mediaindex.ReaderAt, error) {
 			r, err := b.Session.OpenFile(fileIdx)
 			if err != nil {
 				return nil, err
 			}
+			b.mu.Lock()
+			b.readers = append(b.readers, r)
+			b.mu.Unlock()
 			ra, ok := r.(mediaindex.ReaderAt)
 			if !ok {
 				return nil, fmt.Errorf("index: поток не поддерживает ReadAt")
@@ -46,6 +57,17 @@ func (b *IndexBuilder) Build(ctx context.Context) (*mediaindex.Index, error) {
 		},
 	}
 	return mediaindex.Build(b.Info, hints)
+}
+
+// closeReaders закрывает все потоки, открытые при построении индекса.
+func (b *IndexBuilder) closeReaders() {
+	b.mu.Lock()
+	readers := b.readers
+	b.readers = nil
+	b.mu.Unlock()
+	for _, r := range readers {
+		_ = r.Close()
+	}
 }
 
 // readCueFile читает cue-файл раздачи (если он есть).

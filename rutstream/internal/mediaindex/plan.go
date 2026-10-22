@@ -178,10 +178,26 @@ func EstimateDownload(info *metainfo.Info, idx int) (bytes, pieces int64, extra 
 
 // EstimateTrack оценивает объём загрузки конкретного трека.
 //
-// Для трека внутри одного файла (альбом с cue-разметкой) считаем по границам
-// трека, а не по границам файла: скачивается только нужный кусок альбома.
+// Для трека внутри одного файла (альбом с cue-разметкой) размер в байтах
+// неизвестен заранее: кадры FLAC сжаты, поэтому позиция сэмпла в файле
+// зависит от сжатия. Оценка строится пропорционально длительности трека
+// (см. TrackPlan.EstimateBytes), а фактический объём ограничивается
+// длительностью при декодировании.
 func EstimateTrack(info *metainfo.Info, t TrackPlan) (bytes, pieces int64, extra int64) {
-	if info == nil || t.ByteEnd <= t.ByteStart {
+	if info == nil {
+		return 0, 0, 0
+	}
+	if t.EstimateBytes > 0 {
+		bytes = t.EstimateBytes
+		pieces = (bytes + info.PieceLength - 1) / info.PieceLength
+		// Лишние байты: округление до границы piece'а плюс хвост файла,
+		// который тоже придётся скачать (декодирование идёт с начала).
+		if t.ByteEnd > t.ByteStart {
+			extra = ExtraBytes(t.ByteStart, t.ByteEnd, info.PieceLength)
+		}
+		return bytes, pieces, extra
+	}
+	if t.ByteEnd <= t.ByteStart {
 		return 0, 0, 0
 	}
 	pr := PieceRangeFor(t.ByteStart, t.ByteEnd, info.PieceLength)

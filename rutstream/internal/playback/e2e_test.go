@@ -151,17 +151,8 @@ func TestEndToEndStreamAndPlay(t *testing.T) {
 
 // findSample ищет тестовый FLAC в каталоге testdata.
 func findSample(t *testing.T) string {
-	candidates := []string{
-		filepath.Join("testdata", "sample.flac"),
-		filepath.Join("..", "..", "testdata", "sample.flac"),
-	}
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	t.Skip("тестовый FLAC не найден (положите sample.flac в testdata)")
-	return ""
+	path, _ := testutil.WriteTestFLAC(t.TempDir(), "sample.flac", 70)
+	return path
 }
 
 func human(n int64) string {

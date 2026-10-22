@@ -2,16 +2,18 @@ package audio
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
+
+	"github.com/mixa7/rutstream/internal/testutil"
 )
 
 // TestDecodeLocalFLAC проверяет декодер на реальном файле (без торрента).
 func TestDecodeLocalFLAC(t *testing.T) {
-	path := filepath.Join("testdata", "sample.flac")
+	dir := t.TempDir()
+	path, _ := testutil.WriteTestFLAC(dir, "sample.flac", 5)
 	f, err := os.Open(path)
 	if err != nil {
-		t.Skipf("нет тестового файла: %v", err)
+		t.Fatal(err)
 	}
 	defer f.Close()
 

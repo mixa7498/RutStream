@@ -29,8 +29,13 @@ type CueTrack struct {
 	Performer string
 	// Index — смещение трека в сэмплах от начала аудиоданных файла.
 	Index int64
-	// End — конец трека в байтах аудиоданных (заполняется TrackBytes).
-	End int64
+	// EndSamples — конец трека в сэмплах (заполняется TrackSamples).
+	//
+	// Важно: сэмплы НЕ переводятся в байты — кадры FLAC сжаты, и позиция
+	// сэмпла в байтах зависит от сжатия. Поэтому трек внутри альбома можно
+	// найти только последовательным декодированием, а объём скачивания
+	// ограничивается длительностью трека.
+	EndSamples int64
 }
 
 // ParseCue разбирает cue-файл.
@@ -220,28 +225,24 @@ func (c *CueSheet) CueTracksForFile(audioName string) []CueTrack {
 // TrackBytes переводит границы треков из сэмплов в байты аудиоданных.
 //
 // bytesPerSample = каналы × бит на сэмпл / 8.
-func (c *CueSheet) TrackBytes(tracks []CueTrack, channels, bitsPerSample int, totalBytes int64) []CueTrack {
-	if channels <= 0 || bitsPerSample <= 0 {
-		return tracks
-	}
-	bytesPerSample := channels * bitsPerSample / 8
+// TrackSamples проставляет конец каждого трека (в сэмплах).
+//
+// totalSamples — полное число сэмплов в аудиофайле (из STREAMINFO).
+func (c *CueSheet) TrackSamples(tracks []CueTrack, totalSamples int64) []CueTrack {
 	out := make([]CueTrack, len(tracks))
-	for i, t := range tracks {
-		out[i] = t
-		start := t.Index * int64(bytesPerSample)
-		end := int64(totalBytes)
+	copy(out, tracks)
+	for i := range out {
+		end := totalSamples
 		if i+1 < len(tracks) {
-			end = tracks[i+1].Index * int64(bytesPerSample)
+			end = tracks[i+1].Index
 		}
-		if end > totalBytes {
-			end = totalBytes
+		if end > totalSamples {
+			end = totalSamples
 		}
-		if end < start {
-			end = start
+		if end < out[i].Index {
+			end = out[i].Index
 		}
-		out[i].Index = start
-		out[i].Title = t.Title
-		out[i].End = end
+		out[i].EndSamples = end
 	}
 	return out
 }

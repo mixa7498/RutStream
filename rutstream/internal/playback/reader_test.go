@@ -19,10 +19,8 @@ func TestReaderBytesMatchSource(t *testing.T) {
 	if testing.Short() {
 		t.Skip("нужна сеть")
 	}
-	sample := filepath.Join("testdata", "sample.flac")
-	if _, err := os.Stat(sample); err != nil {
-		t.Skip("нет тестового FLAC")
-	}
+	dir := t.TempDir()
+	sample, _ := testutil.WriteTestFLAC(dir, "sample.flac", 70)
 	ctx := context.Background()
 	tmp, err := os.MkdirTemp("", "rutstream-read-")
 	if err != nil {

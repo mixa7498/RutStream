@@ -578,11 +578,13 @@ func cmdPlan(ctx context.Context, args []string) error {
 		}
 		fmt.Println()
 	}
-	fmt.Printf("%-4s %-10s %-11s %-9s %-8s %s\n", "№", "размер", "скачаем", "лишние", "кодек", "файл")
+	fmt.Printf("%-4s %-8s %-10s %-11s %-9s %-6s %s\n",
+		"№", "длит.", "размер", "скачаем", "лишние", "кодек", "трек")
 	for i, t := range ix.Tracks {
 		bytes, _, extra := mediaindex.EstimateTrack(info, t)
-		fmt.Printf("%-4d %-10s %-11s %-9s %-8s %s\n",
-			i+1, human(t.ByteEnd-t.ByteStart), human(bytes), human(extra), t.Codec, t.Title)
+		fmt.Printf("%-4d %-8s %-10s %-11s %-9s %-6s %s\n",
+			i+1, dur(t.DurationSec), human(t.ByteEnd-t.ByteStart),
+			human(bytes), human(extra), t.Codec, t.Title)
 		if i >= 30 {
 			fmt.Printf("… ещё %d треков\n", len(ix.Tracks)-i-1)
 			break
@@ -640,10 +642,12 @@ func cmdPlay(ctx context.Context, args []string) error {
 	player := playback.New(session)
 	wav := filepath.Join(a.dataDir, "preview.wav")
 	res, err := player.PlayTrack(ctx, playback.Track{
-		FileIdx: track.FileIdx,
-		Path:    track.Path,
-		Codec:   track.Codec,
-		Title:   track.Title,
+		FileIdx:      track.FileIdx,
+		Path:         track.Path,
+		Codec:        track.Codec,
+		Title:        track.Title,
+		SkipSamples:  track.SkipSamples,
+		LimitSamples: track.LimitSamples,
 	}, wav)
 	if err != nil {
 		return err

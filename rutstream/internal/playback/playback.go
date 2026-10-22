@@ -34,6 +34,16 @@ type Track struct {
 	ContainerMethod uint16
 	// ByteEnd — конец трека в байтах от начала файла.
 	ByteEnd int64
+	// SkipSamples — сколько сэмплов пропустить в начале файла
+	// (трек внутри альбома с cue-разметкой).
+	SkipSamples int64
+	// PieceStart / PieceEnd — диапазон piece'ов, которые нужно скачать
+	// (для трека внутри альбома — от начала файла до конца трека).
+	PieceStart int
+	PieceEnd   int
+	// LimitSamples — сколько сэмплов трека (0 — весь файл).
+	// Декодер останавливается на этом объёме, и загрузка не идёт дальше.
+	LimitSamples int64
 }
 
 // Result — итог воспроизведения.
@@ -45,6 +55,8 @@ type Result struct {
 	Device      bool
 	// Сколько байт реально скачано за сессию (трафик).
 	BytesDownloaded int64
+	// BytesRead — сколько байт прочитано из файла (объём нужных данных).
+	BytesRead int64
 	// Время до первого звука.
 	TimeToFirstAudio time.Duration
 	// Время от старта до конца трека.
@@ -68,8 +80,22 @@ func (p *Player) Session() *torrent.Session { return p.session }
 func (p *Player) PlayTrack(ctx context.Context, track Track, outFile string) (*Result, error) {
 	start := time.Now()
 
-	// 1. Ограничиваем загрузку только нужным файлом.
-	if err := p.session.SetWantedFiles([]int{track.FileIdx}); err != nil {
+	// 1. Ограничиваем загрузку нужными piece'ами.
+	//
+	// Обычный трек — отдельный файл раздачи, нужен целиком: поднимаем
+	// приоритет файла.
+	//
+	// Трек внутри альбома (cue-разметка) — отдельного файла нет, трек лежит
+	// внутри FLAC. Позицию трека в байтах узнать нельзя (кадры сжаты), но
+	// известна его длительность. Поэтому снимаем приоритет у файлов: куски
+	// подтягиваются по мере чтения (читатель поднимает приоритет текущего
+	// piece'а), а декодер останавливается на границе трека — остаток альбома
+	// не скачивается.
+	if track.SkipSamples > 0 {
+		if err := p.session.SetWantedFiles(nil); err != nil {
+			return nil, err
+		}
+	} else if err := p.session.SetWantedFiles([]int{track.FileIdx}); err != nil {
 		return nil, err
 	}
 	// 2. Открываем поток файла. Чтение «подтягивает» нужные piece'ы.
@@ -111,7 +137,7 @@ func (p *Player) PlayTrack(ctx context.Context, track Track, outFile string) (*R
 	src := io.MultiReader(bytes.NewReader(head), r)
 
 	// 5. Декодируем и выводим.
-	res, err := audio.Play(src, codec, outFile)
+	res, err := audio.PlayRange(src, codec, outFile, track.SkipSamples, track.LimitSamples)
 	if err != nil {
 		return nil, err
 	}
@@ -123,6 +149,7 @@ func (p *Player) PlayTrack(ctx context.Context, track Track, outFile string) (*R
 		Output:          res.Output,
 		Device:          res.Device,
 		BytesDownloaded: st.BytesDownloaded,
+		BytesRead:       torrent.BytesRead(r),
 		TimeToFirstAudio: time.Since(start),
 		Elapsed:         time.Since(start),
 	}, nil
